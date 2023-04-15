@@ -17,10 +17,10 @@ from vespa_postproc import (
     fsd_filename_to_datetime,
     parallel_read_and_average_fsd,
     parse_surface_mesh,
-    parse_temperature_file,
+    parse_fsd_file,
     read_fsd,
     read_met,
-    serial_read_and_average_fsd,
+    serial_read_and_average_nodal_fsd,
     set_met_index_to_datetime,
 )
 
@@ -153,13 +153,13 @@ def test_parse_surface_mesh(mesh_data):
         f.write(mesh_data)
         mesh_file = f.name
 
-    facets, nodes = parse_surface_mesh(mesh_file)
+    nodes, facets = parse_surface_mesh(mesh_file)
 
     # Expected output
     expected_facets = np.array([
-        [5, 1, 2, 3],
-        [1, 1, 5, 3],
-        [2, 3, 6, 3]
+        [1, 2, 3, 5],
+        [1, 5, 3, 1],
+        [3, 6, 3, 2]
     ])
     expected_nodes = np.array([
         [0.5, 0.5, 0.5],
@@ -181,7 +181,7 @@ def temperature_files_data():
         '12.0\n22.0\n32.0\n42.0\n52.0\n62.0\n',
     ]
 
-def test_parse_temperature_file():
+def test_parse_fsd_file():
     temperature_file = 'temperature.fsd'
     with open(temperature_file, 'w') as f:
         f.write("""10.5
@@ -193,22 +193,22 @@ def test_parse_temperature_file():
 """)
 
     # Call the function and get the result
-    temperatures = parse_temperature_file(temperature_file)
+    fsd_data = parse_fsd_file(temperature_file)
 
     # Expected output
-    expected_temperatures = np.array([ 10.5, 15.7, 20.3, 25.1, 30.8, 35.4 ])
+    expected_fsd_data = np.array([ 10.5, 15.7, 20.3, 25.1, 30.8, 35.4 ])
 
     # Assert that the output matches the expected values
-    assert np.array_equal(temperatures, expected_temperatures)
+    assert np.array_equal(fsd_data, expected_fsd_data)
 
-def test_serial_read_and_average_fsd():
+def test_serial_read_and_average_nodal_fsd():
     mesh_file = "./data/Scenario1_mats.2dm"
     temperature_file = "./data/file_sock300_181012.fsd"
     # [43.402247539002865, 45.91624048917751, 37.7665000634218]
     expected = pd.Series({1: 43.402247539002865,
                           2: 45.91624048917751,
                           5: 37.7665000634218})
-    result = serial_read_and_average_fsd(mesh_file, temperature_file)
+    result = serial_read_and_average_nodal_fsd(mesh_file, temperature_file)
     pd.testing.assert_series_equal(result, expected, check_names=False)
 
 def test_parallel_read_and_average_fsd():
@@ -241,21 +241,19 @@ def test_compute_averages():
                                                      5: 37.93235}),
     }
     result = compute_averages(mesh_file, temperature_files, start_year)
-    print(f"---------------------")
-    print(f"{result.head()=}")
 
     expected_index = pd.to_datetime(["2022-06-30 12:00", "2022-06-30 13:00",
                                      "2022-06-30 14:00"])
-    expected_columns = ["Temperature_Ave_MatID_1", "Temperature_Ave_MatID_2", "Temperature_Ave_MatID_5"]
+    expected_columns = ["Temperature_Ave_MatID_1",
+                        "Temperature_Ave_MatID_2",
+                        "Temperature_Ave_MatID_5"]
     expected_data = [
         [43.40225, 45.91624, 37.7665],
         [42.57872, 44.43341, 37.466],
         [43.08382, 44.60421, 37.93235]
     ]
-    expected_result = pd.DataFrame(expected_data, index=expected_index, columns=expected_columns)
-
-    print(f"---------------------")
-    print(f"{expected_result.head()=}")
+    expected_result = pd.DataFrame(expected_data, index=expected_index,
+                                   columns=expected_columns)
 
     pd.testing.assert_frame_equal(result, expected_result)
 
@@ -274,57 +272,20 @@ def test_build_fsd_dataframe(file_averages):
 
     expected_index = pd.to_datetime(["2018-10-10 10:00", "2018-10-10 11:00",
                                      "2018-10-10 12:00"])
-    expected_columns = ["Temperature_Ave_MatID_1", "Temperature_Ave_MatID_2", "Temperature_Ave_MatID_5"]
+    expected_columns = ["Temperature_Ave_MatID_1",
+                        "Temperature_Ave_MatID_2",
+                        "Temperature_Ave_MatID_5"]
     expected_data = [
         [31.0, 41.0, 21.0],
         [32.0, 42.0, 22.0],
         [33.0, 43.0, 23.0]
     ]
 
-    expected_result = pd.DataFrame(expected_data, index=expected_index, columns=expected_columns)
+    expected_result = pd.DataFrame(expected_data, index=expected_index,
+                                   columns=expected_columns)
 
     pd.testing.assert_frame_equal(result, expected_result)
 
-# def test_compute_averages():
-#     mesh_file = "dummy_mesh_file"
-#     temperature_files = [
-#         "file_sock300_283010.fsd",
-#         "file_sock300_283011.fsd",
-#         "file_sock300_283012.fsd",
-#     ]
-#     start_year = 2018
-#     column_prefix = "Temperature"
-#
-#     # Mock serial_read_and_average_fsd function
-#     mock_serial_read_and_average_fsd = MagicMock(
-#         side_effect=[
-#             pd.Series({1: 31.0, 2: 41.0, 5: 21.0}),
-#             pd.Series({1: 32.0, 2: 42.0, 5: 22.0}),
-#             pd.Series({1: 33.0, 2: 43.0, 5: 23.0}),
-#         ]
-#     )
-#
-#     with unittest.mock.patch("vespa_postproc.serial_read_and_average_fsd", mock_serial_read_and_average_fsd):
-#         result = compute_averages(
-#             mesh_file,
-#             temperature_files,
-#             start_year,
-#             column_prefix=column_prefix,
-#             num_processors=1,
-#         )
-#
-#     expected_index = pd.to_datetime(["2018-10-10 10:00", "2018-10-10 11:00",
-#                                      "2018-10-10 12:00"])
-#     expected_columns = ["Temperature_Ave_MatID_1", "Temperature_Ave_MatID_2", "Temperature_Ave_MatID_5"]
-#     expected_data = np.array([
-#         [31.0, 41.0, 21.0],
-#         [32.0, 42.0, 22.0],
-#         [33.0, 43.0, 23.0]
-#     ])
-#
-#     expected_result = pd.DataFrame(expected_data, index=expected_index, columns=expected_columns)
-#
-#     pd.testing.assert_frame_equal(result, expected_result)
 
 def test_fsd_filename_to_datetime():
     filename = "file_sock300_180000.fsd"

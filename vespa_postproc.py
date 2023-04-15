@@ -116,41 +116,19 @@ def parse_surface_mesh(meshfile: str) -> Tuple[np.ndarray, np.ndarray]:
             if tokens[0] == 'E3T':
                 node_numbers = [int(tokens[i]) for i in range(2, 5)]
                 material_id = int(tokens[5])
-                facets.append((material_id, ) + tuple(node_numbers))
+                facets.append(tuple(node_numbers) + (material_id,))
             elif tokens[0] == 'ND':
                 nodes.append(tuple(float(tokens[i]) for i in range(2, 5)))
-    return np.array(facets), np.array(nodes)
+    return np.array(nodes), np.array(facets)
 
-def parse_temperature_file(temperature_file):
-    temperatures = []
-    with open(temperature_file, 'r') as f:
+def parse_fsd_file(fsd_file):
+    fsd_data = []
+    with open(fsd_file, 'r') as f:
         for i, line in enumerate(f):
-            temperature = float(line.strip())
-            temperatures.append(temperature)
-    return np.array(temperatures)
+            fsd_datum = float(line.strip())
+            fsd_data.append(fsd_datum)
+    return np.array(fsd_data)
 
-
-# def serial_read_and_average_fsd(mesh_file: str, temperature_files: List[str]) -> pd.DataFrame:
-#     facets, nodes = parse_surface_mesh(mesh_file)
-#     temp_sums = pd.Series(0.0, index=np.unique(facets[:, 0]))
-#     temp_counts = pd.Series(0, index=np.unique(facets[:, 0]))
-#
-#     for temperature_file in temperature_files:
-#         temperatures = parse_temperature_file(temperature_file)
-#
-#         for facet in facets:
-#             material_id = facet[0]
-#             node_temps = [temperatures[node_index - 1] for node_index in facet[1:]]  # Subtract 1 from node_index
-#             temp_sums[material_id] += sum(node_temps)
-#             temp_counts[material_id] += len(node_temps)
-#
-#     return temp_sums / temp_counts
-#
-#
-# def parallel_read_and_average_fsd(mesh_file: str, temperature_files: List[str]) -> pd.DataFrame:
-#     with concurrent.futures.ProcessPoolExecutor() as executor:
-#         future = executor.submit(serial_read_and_average_fsd, mesh_file, temperature_files)
-#         return future.result()
 
 def build_fsd_dataframe(
     file_averages: Dict[str, pd.Series], start_year: int, column_prefix: str = "Temperature"
@@ -162,25 +140,28 @@ def build_fsd_dataframe(
     df.columns = df.columns.map(lambda x: f"{column_prefix}_{x}")
     return df
 
-def serial_read_and_average_fsd(mesh_file: str, temperature_file: str) -> pd.Series:
-    facets, nodes = parse_surface_mesh(mesh_file)
-    temp_sums = pd.Series(0.0, index=np.unique(facets[:, 0]))
-    temp_counts = pd.Series(0, index=np.unique(facets[:, 0]))
+def serial_read_and_average_nodal_fsd(mesh_file: str, fsd_file: str) -> pd.Series:
+    nodes, facets = parse_surface_mesh(mesh_file)
+    # set each material ID to 0.0
+    temp_sums = pd.Series(0.0, index=np.unique(facets[:, -1]))
+    temp_counts = pd.Series(0, index=np.unique(facets[:, -1]))
 
-    temperatures = parse_temperature_file(temperature_file)
+    fsd_data = parse_fsd_file(fsd_file)
 
     for facet in facets:
-        material_id = facet[0]
-        node_temps = [temperatures[node_index - 1] for node_index in facet[1:]]  # Subtract 1 from node_index
-        temp_sums[material_id] += sum(node_temps)
-        temp_counts[material_id] += len(node_temps)
+        material_id = facet[-1]
+        nodal_data = [fsd_data[node_index - 1] for node_index in facet[:3]]
+        # Subtract 1 from node_index
+        temp_sums[material_id] += sum(nodal_data)
+        temp_counts[material_id] += len(nodal_data)
 
     return np.round(temp_sums / temp_counts, 5)
 
 
 def parallel_read_and_average_fsd(mesh_file: str, temperature_file: str) -> pd.Series:
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        future = executor.submit(serial_read_and_average_fsd, mesh_file, temperature_file)
+        future = executor.submit(serial_read_and_average_nodal_fsd, mesh_file,
+                                 temperature_file)
         return future.result()
 
 
@@ -193,7 +174,7 @@ def compute_averages(
 ) -> pd.DataFrame:
     def process_file(temperature_file):
         if num_processors == 1:
-            return serial_read_and_average_fsd(mesh_file, temperature_file)
+            return serial_read_and_average_nodal_fsd(mesh_file, temperature_file)
         else:
             return parallel_read_and_average_fsd(mesh_file, temperature_file)
 
@@ -224,10 +205,7 @@ if __name__ == "__main__":
     met = read_met('data/TestPlot.met')
     met_dt = set_met_index_to_datetime(met, 2022)
     print(f"{met_dt.head()=}")
-    fsd_data = serial_read_and_average_fsd('data/Scenario1.2dm',
+    fsd_data = serial_read_and_average_nodal_fsd('data/Scenario1.2dm',
                                            glob.glob('data/file_sock300*.fsd'))
 
-    print(f"{fsd_data.head()=}")
     temps_df = build_fsd_dataframe(fsd_data, 2022, 'Temperature')
-    print(f"{temps_df.head()=}")
-
