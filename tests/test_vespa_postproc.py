@@ -354,7 +354,7 @@ def test_merge_dataframes_on_datetime_invalid_input():
         merge_dataframes_on_datetime()
 
 def test_read_image_panel():
-    image_path = "./data/Scenario1_181009_LWIR.jpg"
+    image_path = "./data/Scenario1_181010_LWIR.jpg"
     image_pane = read_image_panel(image_path)
 
     assert isinstance(image_pane, pn.pane.JPG)

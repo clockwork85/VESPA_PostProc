@@ -1,14 +1,21 @@
 #!/usr/bin/env python3
 
 import concurrent.futures
+from datetime import datetime, timedelta
 import logging
 import glob
 from typing import List, Dict, Tuple
 
+from bokeh.layouts import gridplot
+from bokeh.models import ColumnDataSource
+from bokeh.plotting import figure, show
 import hvplot.pandas as hvplot
 import numpy as np
 import pandas as pd
 import panel as pn
+from panel.template import FastListTemplate
+from panel.layout.gridstack import GridStack
+import param
 from PIL import Image
 import pyvista as pv
 from rich.logging import RichHandler
@@ -244,8 +251,8 @@ def merge_dataframes_on_datetime(
     return merged_data
 
 # Images
-def read_image_panel(image_path: str) -> pn.pane.PNG:
-    return pn.pane.PNG(image_path, width=500, height=500)
+def read_image_panel(image_path: str) -> pn.pane.JPG:
+    return pn.pane.JPG(image_path, width=500, height=500)
 
 def display_images(image_paths: List[str]) -> pn.Column:
     image_panes = [read_image_panel(image_path) for image_path in image_paths]
@@ -286,17 +293,172 @@ def read_2dm_pyvista(mesh_file: str) -> pv.PolyData:
     print(f"{len(mesh.points)=} points")
     print(f"{len(mesh.faces)=} faces")
     print(f"{mesh.n_cells=}")
-    mesh.cell_data['Region'] = np.array(mats, dtype=np.int32)
+    mesh.cell_data['MatID'] = np.array(mats, dtype=np.int32)
 
     return mesh
 
 def plot_mesh(mesh_file: str) -> pv.Plotter:
     mesh = read_2dm_pyvista(mesh_file)
     plotter = pv.Plotter(window_size=(1000, 1000))
-    plotter.add_mesh(mesh, scalars='Region', show_edges=True, show_scalar_bar=True)
+    plotter.add_mesh(mesh, scalars='MatID', show_edges=True, show_scalar_bar=True)
     plotter.view_xy()
     return plotter
 
+def create_met_plot(source: ColumnDataSource, met_column: str,
+                    legend_label: str, y_axis_label: str, **kwargs) -> \
+        figure:
+    title = f"{met_column.capitalize()} vs. Date"
+    met_plot = figure(title=title, x_axis_type='datetime',
+                      x_axis_label='Date', y_axis_label=y_axis_label,
+                      **kwargs)
+    met_plot.line(x='index', y=met_column, source=source, legend_label=legend_label)
+
+    met_plot.legend.location = 'top_left'
+    met_plot.legend.click_policy = 'hide'
+
+    return met_plot
+
+def create_variable_plot(source: ColumnDataSource, columns: List[str], title: str,
+                         y_axis_label: str) -> figure:
+    var_plot = figure(title=title, x_axis_type='datetime', x_axis_label='Date',
+                      y_axis_label=y_axis_label)
+    colors = ["blue", "red", "green", "purple", "orange", "cyan", "magenta"]
+    for i, column in enumerate(columns):
+        var_plot.line(x='index', y=column, source=source, line_width=2,
+                      color=colors[i], legend_label=column)
+    var_plot.legend.location = 'top_left'
+    return var_plot
+
+
+class Dashboard(param.Parameterized):
+    # met_column = param.ListSelector(default=['Temp'], objects=['Temp', 'RH',
+    #                                                             'WindDir'])
+
+    def __init__(self, source: ColumnDataSource, **params):
+        super().__init__(**params)
+        self.source = source
+        # self.param.watch(self._update_met_plot, 'met_column')
+        self.date_range_slider = pn.widgets.DateRangeSlider(
+            name='Range', start=source.data['index'][0],
+            end=source.data['index'][-1], value=(source.data['index'][0],
+                                                source.data['index'][-1]),
+            step=60 * 60 * 1000, tooltips=True, format='%Y-%m-%d %H:%M')
+
+        self.date_slider = pn.widgets.DateSlider(name='Date',
+                                                 start=source.data['index'][0],
+                                                 end=source.data['index'][-1],
+                                                 value=source.data['index'][0],
+                                                 step=60 * 60 * 1000,
+                                                 tooltips=True,
+                                                 format='%Y-%m-%d %H:%M')
+
+        self.met_variable_select = pn.widgets.Select(name='Met Variable',
+                                                 options=['Temp', 'RH', 'Global'],
+                                                 value='Temp')
+
+
+    @pn.depends("met_variable_select.param.value")
+    def update_met_plot(self, selected_variable):
+        met_column = selected_variable
+        y_axis_label = selected_variable
+        legend_label = selected_variable
+        return create_met_plot(self.source, met_column, legend_label, y_axis_label)
+
+    def temperature_plot(self):
+        return create_variable_plot(self.source, [x for x in self.source.data.keys()
+                                                  if x.startswith('Temperature')],
+                                    'Temperature Plot', 'Temp')
+
+    def flux_plot(self):
+        return create_variable_plot(self.source, [x for x in self.source.data.keys()
+                                                  if x.startswith('Flux')],
+                                    'Flux Plot', 'Flux')
+
+    def view(self):
+        # met_plot = self.met_plot()
+        # Met Plot
+        met_plot = pn.bind(self.update_met_plot, self.met_variable_select.param.value)
+        met_plot_widget = pn.Column(self.met_variable_select, met_plot,
+                                    sizing_mode='stretch_both', width=100, height=75)
+        # Temperature Plot
+        temp_plot = self.temperature_plot()
+        # temp_plot.sizing_mode = 'stretch_both'
+        # temp_plot.width = 100
+        # temp_plot.height = 75
+        temp_plot_widget = pn.Column(pn.Spacer(height=50), temp_plot,
+                                     sizing_mode='stretch_both',
+                                     width=100,
+                                     height=75)
+
+        # Flux Plot
+        flux_plot = self.flux_plot()
+        # flux_plot.sizing_mode = 'stretch_both'
+        # flux_plot.width = 100
+        # flux_plot.height = 75
+        flux_plot_widget = pn.Column(pn.Spacer(height=50), flux_plot,
+                                     sizing_mode='stretch_both',
+                                     width=100,
+                                     height=75)
+
+        # Spatial VTK Plot
+        plotter = plot_mesh("data/Scenario1_mats.2dm")
+        vtk_pane = pn.panel(plotter.ren_win, sizing_mode='stretch_both', width=200,
+                            height=200)
+
+        # Image Plot
+        image_pane = display_images(["data/Scenario1_181011_LWIR.jpg"])
+        image_pane.sizing_mode = 'stretch_both'
+        image_pane.width = 100
+        image_pane.height = 100
+
+        # Image Histogram Plot
+        image_hist = image_histogram("data/Scenario1_181011_LWIR.jpg")
+        image_hist.sizing_mode = 'stretch_both'
+        image_hist.width = 100
+        image_hist.height = 100
+
+        # dashboard = pn.GridSpec(sizing_mode='stretch_both')
+        # dashboard = pn.GridSpec(sizing_mode='stretch_width', ncols=3, nrows=3)
+        # dashboard[:2, :2] = vtk_pane
+        # dashboard[2, 0] = image_pane
+        # dashboard[2, 1] = image_hist
+        # dashboard[:, 2] = pn.Column(met_plot, temp_plot, flux_plot)
+        # dashboard = pn.GridSpec(sizing_mode='stretch_both', height=1200, width=800)
+        # dashboard[0:2, 0] = image_pane
+        # dashboard[:2, 1:3] = vtk_pane
+        # dashboard[3:5, 0] = met_plot_widget
+        # dashboard[3:5, 1] = temp_plot_widget
+        # dashboard[3:5, 2] = flux_plot_widget
+        #
+        # dashboard[2, :] = pn.Spacer(background='#FF0000', height=5)
+        top_row = pn.Row(image_pane.clone(), image_hist.clone(), vtk_pane.clone(),
+                         sizing_mode='stretch_both')
+        bottom_row = pn.Row(met_plot_widget.clone(), temp_plot_widget.clone(),
+                            flux_plot_widget.clone(),
+                            sizing_mode='stretch_both')
+
+        self.template = FastListTemplate(site="Panel", title="VESPA Simulation "
+                                                             "Analysis",
+                                    main=[pn.Column(pn.pane.Markdown('## Spatial '
+                                                                'Components'),
+                                                    top_row, pn.Spacer( background='#1f1f1f', height=5),
+                                                    pn.pane.Markdown('## Plots '
+                                                                  'Components'),
+                                                            bottom_row)],
+                                    sidebar=[pn.pane.Markdown('## Date Range'),
+                                             pn.pane.Markdown('### Choose the date '
+                                                              'range to graph the '
+                                                              'data'),
+                                             self.date_range_slider,
+                                             pn.Spacer(height=50),
+                                             pn.pane.Markdown('## Date'),
+                                             pn.pane.Markdown('### Choose the '
+                                                              'particular date to '
+                                                              'view spatial data'),
+                                             self.date_slider]
+                                    )
+
+        return self.template
 
 if __name__ == "__main__":
     met = read_met("data/Scenario1.met")
@@ -308,6 +470,7 @@ if __name__ == "__main__":
         "Temperature",
     )
 
+
     flux_data = compute_fsd_averages_by_material_id(
         "data/Scenario1_mats.2dm",
         glob.glob("data/file_sock200*.fsd"),
@@ -318,16 +481,33 @@ if __name__ == "__main__":
 
     dfs = merge_dataframes_on_datetime(met_dt, temp_data, flux_data)
 
-    dashboard = display_images(["data/Scenario1_181011_LWIR.png",
-                                "data/Scenario1_181019_LWIR.png"])
-    image_hist = image_histogram("data/Scenario1_181011_LWIR.png")
-    dashboard.append(image_hist)
+    source = ColumnDataSource(dfs)
 
-    plotter = plot_mesh("data/Scenario1_mats.2dm")
-    vtk_pane = pn.panel(plotter.ren_win, width=1000, height=700)
-    dashboard.append(vtk_pane)
+    # met_plot = create_met_plot(source, 'Temp', 'Air Temperature', 'Temp')
+    # temp_plot = create_variable_plot(source, ['Temperature_Ave_MatID_1',
+    #                                             'Temperature_Ave_MatID_2',
+    #                                             'Temperature_Ave_MatID_5'],
+    #                                             'Temperature', 'Temp')
+    # flux_plot = create_variable_plot(source, ['Flux_Ave_MatID_1',
+    #                                             'Flux_Ave_MatID_2',
+    #                                             'Flux_Ave_MatID_5'],
+    #                                             'Flux', 'Flux')
+    # Dashboard
+    # dashboard = pn.GridSpec(sizing_mode='stretch_both')
+    # plotter = plot_mesh("data/Scenario1_mats.2dm")
+    # vtk_pane = pn.panel(plotter.ren_win, width=1000, height=700)
+    # dashboard[:3, :2] = vtk_pane
+    # dashboard[3:6, 0] = display_images(["data/Scenario1_181011_LWIR.jpg"])
+    # image_hist = image_histogram("data/Scenario1_181011_LWIR.jpg")
+    # dashboard[3:6, 1] = image_hist
+    # dashboard[:2, 2] = met_plot
+    # dashboard[2:4, 2] = temp_plot
+    # dashboard[4:6, 2] = flux_plot
+    #
+    # dashboard.show()
+    dashboard = Dashboard(source)
+    dashboard.view().show()
 
-    dashboard.show()
 
 
     # temps_df = build_fsd_dataframe(temp_data, 2022, 'Temperature')
