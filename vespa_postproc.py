@@ -1,19 +1,22 @@
 #!/usr/bin/env python3
 
 import concurrent.futures
-from datetime import datetime, timedelta
+from datetime import date, datetime, time
 import logging
 import glob
 from typing import List, Dict, Tuple
 
 from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource
+from bokeh.models.annotations import Span
+from bokeh.models import CustomJS
 from bokeh.plotting import figure, show
 import hvplot.pandas as hvplot
 import numpy as np
 import pandas as pd
 import panel as pn
-from panel.template import FastListTemplate
+from panel.template import FastListTemplate, MaterialTemplate, FastGridTemplate
+from panel.template.theme import DarkTheme
 from panel.layout.gridstack import GridStack
 import param
 from PIL import Image
@@ -304,40 +307,49 @@ def plot_mesh(mesh_file: str) -> pv.Plotter:
     plotter.view_xy()
     return plotter
 
+def numpy_datetime64_to_datetime(dt64: np.datetime64) -> datetime:
+    if isinstance(dt64, date):
+        return datetime.combine(dt64, datetime.min.time())
+    ts = (dt64.astype('datetime64[s]') - np.datetime64('1970-01-01T00:00:00', 's')) / np.timedelta64(1, 's')
+    return datetime.utcfromtimestamp(ts)
 def create_met_plot(source: ColumnDataSource, met_column: str,
-                    legend_label: str, y_axis_label: str, **kwargs) -> \
-        figure:
+                    legend_label: str, y_axis_label: str, span_line: Span) -> figure:
     title = f"{met_column.capitalize()} vs. Date"
     met_plot = figure(title=title, x_axis_type='datetime',
                       x_axis_label='Date', y_axis_label=y_axis_label,
-                      **kwargs)
+                      )
     met_plot.line(x='index', y=met_column, source=source, legend_label=legend_label)
-
+    # span_line = Span(location=span_location, dimension='width', line_color='red',
+    #                     line_dash='dashed', line_width=3)
+    met_plot.add_layout(span_line)
     met_plot.legend.location = 'top_left'
     met_plot.legend.click_policy = 'hide'
 
     return met_plot
 
 def create_variable_plot(source: ColumnDataSource, columns: List[str], title: str,
-                         y_axis_label: str) -> figure:
+                         y_axis_label: str, span_line: Span) -> figure:
     var_plot = figure(title=title, x_axis_type='datetime', x_axis_label='Date',
                       y_axis_label=y_axis_label)
     colors = ["blue", "red", "green", "purple", "orange", "cyan", "magenta"]
     for i, column in enumerate(columns):
         var_plot.line(x='index', y=column, source=source, line_width=2,
                       color=colors[i], legend_label=column)
+
+    # span_line = Span(location=span_location, dimension='width', line_color='red',
+    #                     line_dash='dashed', line_width=3)
+    var_plot.add_layout(span_line)
     var_plot.legend.location = 'top_left'
+    var_plot.legend.click_policy = 'hide'
     return var_plot
 
 
 class Dashboard(param.Parameterized):
-    # met_column = param.ListSelector(default=['Temp'], objects=['Temp', 'RH',
-    #                                                             'WindDir'])
-
     def __init__(self, source: ColumnDataSource, **params):
         super().__init__(**params)
         self.source = source
-        # self.param.watch(self._update_met_plot, 'met_column')
+        self.filtered_source = ColumnDataSource(data=self.source.data)
+
         self.date_range_slider = pn.widgets.DateRangeSlider(
             name='Range', start=source.data['index'][0],
             end=source.data['index'][-1], value=(source.data['index'][0],
@@ -345,6 +357,7 @@ class Dashboard(param.Parameterized):
             step=60 * 60 * 1000, tooltips=True, format='%Y-%m-%d %H:%M')
 
         self.date_slider = pn.widgets.DateSlider(name='Date',
+                                                 as_datetime=True,
                                                  start=source.data['index'][0],
                                                  end=source.data['index'][-1],
                                                  value=source.data['index'][0],
@@ -356,45 +369,117 @@ class Dashboard(param.Parameterized):
                                                  options=['Temp', 'RH', 'Global'],
                                                  value='Temp')
 
+        initial_date_value = self.date_slider.value
+        print(f"{initial_date_value=}")
+        if self.filtered_source.data['index'].min() <= initial_date_value <= \
+                self.filtered_source.data['index'].max():
+            print(f"Span location is within range of filtered source")
+        else:
+            print(f"Span location is NOT within range of filtered source")
+            print(f"{self.filtered_source.data['index'].min()=}")
+            print(f"{self.filtered_source.data['index'].max()=}")
+            print(f"{initial_date_value=}")
 
-    @pn.depends("met_variable_select.param.value")
-    def update_met_plot(self, selected_variable):
-        met_column = selected_variable
-        y_axis_label = selected_variable
-        legend_label = selected_variable
-        return create_met_plot(self.source, met_column, legend_label, y_axis_label)
+        self.span_line = Span(location=initial_date_value, dimension='height',
+                              line_color='red', line_dash='dashed', line_width=3)
 
-    def temperature_plot(self):
-        return create_variable_plot(self.source, [x for x in self.source.data.keys()
-                                                  if x.startswith('Temperature')],
-                                    'Temperature Plot', 'Temp')
+        # Bind date range slider to update filtered source
+        self.date_range_slider.param.watch(self.update_filtered_source, 'value')
+        self.date_slider.param.watch(self.update_plots, 'value')
 
-    def flux_plot(self):
-        return create_variable_plot(self.source, [x for x in self.source.data.keys()
+        # self.date_slider.js_on_change('value', CustomJS(args=dict(span_line=self.span_line), code="""
+        #     let date_value = cb_obj.value;
+        #     let dt_value = new Date(date_value);
+        #     let span_location = dt_value.getTime();
+        #     span_line.location = span_location;
+        #     console.log(`From inside CustomJS: ${span_location}`);
+        # """))
+
+    @pn.depends("date_slider.param.value")
+    def update_span_line(self, date_event):
+        print(f"{date_event=}")
+        print(f"{self.date_slider.value=}")
+        date_value = np.datetime64(self.date_slider.value)
+        print(f"From inside update_span_line: {date_value=}")
+        self.span_line = Span(location=date_value, dimension='height',
+                              line_color='red', line_dash='dashed', line_width=3)
+        print(f"From inside update_span_line: {self.span_line=}")
+
+    def update_plots(self, event):
+        self.update_span_line(event)
+        self.temperature_plot(event)
+        self.flux_plot(event)
+        self.update_met_plot(self.met_variable_select.value,
+                             self.date_slider.value, event)
+
+    # @pn.depends("date_slider.param.value")
+    # def update_span_line(self, date_event):
+    #     date_value = date_event.new
+    #     print(f"From inside update_span_line: {date_value=}")
+    #     span_location = dt_value.timestamp() * 1000
+    #     self.span_line.location = span_location
+    #     # return span_location
+    #     print(f"From inside update_span_line: {span_location=}")
+
+
+    @pn.depends("date_range_slider.param.value")
+    def update_filtered_source(self, event):
+        date_range = event.new
+        start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
+        mask = (self.source.data['index'] >= start) & (self.source.data['index'] <= end)
+        self.filtered_source.data = {key: value[mask] for key, value in self.source.data.items()}
+
+    @pn.depends("met_variable_select.param.value", "date_slider.param.value")
+    def update_met_plot(self, met_variable: str,  date: np.datetime64, event=None) -> \
+            pn.layout:
+        met_column = met_variable
+        y_axis_label = met_variable
+        legend_label = met_variable
+        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
+        #                                  time.min).timestamp() * 1000
+        return create_met_plot(self.filtered_source, met_column, legend_label,
+                               y_axis_label, self.span_line)
+
+    @pn.depends("date_slider.param.value")
+    def temperature_plot(self, date: np.datetime64) -> pn.layout:
+        title = 'Temperature vs. Date'
+        y_axis_label = 'Temperature (°C)'
+        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
+        #                                  time.min).timestamp() * 1000
+        return create_variable_plot(self.filtered_source,
+                                    [x for x in self.filtered_source.data.keys()
+                                        if x.startswith('Temperature')],
+                                    title, y_axis_label, self.span_line)
+
+    @pn.depends("date_slider.param.value")
+    def flux_plot(self, date: np.datetime64) -> pn.layout:
+        title = 'Flux vs. Date'
+        y_axis_label = 'Flux (W/m^2)'
+        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
+        #                                  time.min).timestamp() * 1000
+        return create_variable_plot(self.filtered_source,
+                                    [x for x in self.filtered_source.data.keys()
                                                   if x.startswith('Flux')],
-                                    'Flux Plot', 'Flux')
+                                    title, y_axis_label, self.span_line)
 
     def view(self):
-        # met_plot = self.met_plot()
-        # Met Plot
-        met_plot = pn.bind(self.update_met_plot, self.met_variable_select.param.value)
+
+        # Plots
+        met_plot = pn.panel(pn.bind(self.update_met_plot, self.met_variable_select,
+                           self.date_slider.param.value, self.date_slider.param.value))
+        temp_plot = pn.panel(pn.bind(self.temperature_plot,
+                                     self.date_slider.param.value))
+        flux_plot = pn.panel(pn.bind(self.flux_plot, self.date_slider.param.value))
+
+        # Widgets
         met_plot_widget = pn.Column(self.met_variable_select, met_plot,
                                     sizing_mode='stretch_both', width=100, height=75)
-        # Temperature Plot
-        temp_plot = self.temperature_plot()
-        # temp_plot.sizing_mode = 'stretch_both'
-        # temp_plot.width = 100
-        # temp_plot.height = 75
+
         temp_plot_widget = pn.Column(pn.Spacer(height=50), temp_plot,
                                      sizing_mode='stretch_both',
                                      width=100,
                                      height=75)
 
-        # Flux Plot
-        flux_plot = self.flux_plot()
-        # flux_plot.sizing_mode = 'stretch_both'
-        # flux_plot.width = 100
-        # flux_plot.height = 75
         flux_plot_widget = pn.Column(pn.Spacer(height=50), flux_plot,
                                      sizing_mode='stretch_both',
                                      width=100,
@@ -417,32 +502,19 @@ class Dashboard(param.Parameterized):
         image_hist.width = 100
         image_hist.height = 100
 
-        # dashboard = pn.GridSpec(sizing_mode='stretch_both')
-        # dashboard = pn.GridSpec(sizing_mode='stretch_width', ncols=3, nrows=3)
-        # dashboard[:2, :2] = vtk_pane
-        # dashboard[2, 0] = image_pane
-        # dashboard[2, 1] = image_hist
-        # dashboard[:, 2] = pn.Column(met_plot, temp_plot, flux_plot)
-        # dashboard = pn.GridSpec(sizing_mode='stretch_both', height=1200, width=800)
-        # dashboard[0:2, 0] = image_pane
-        # dashboard[:2, 1:3] = vtk_pane
-        # dashboard[3:5, 0] = met_plot_widget
-        # dashboard[3:5, 1] = temp_plot_widget
-        # dashboard[3:5, 2] = flux_plot_widget
-        #
-        # dashboard[2, :] = pn.Spacer(background='#FF0000', height=5)
-        top_row = pn.Row(image_pane.clone(), image_hist.clone(), vtk_pane.clone(),
+        bottom_row = pn.Row(image_pane, image_hist, vtk_pane,
                          sizing_mode='stretch_both')
-        bottom_row = pn.Row(met_plot_widget.clone(), temp_plot_widget.clone(),
-                            flux_plot_widget.clone(),
+        top_row = pn.Row(met_plot_widget, temp_plot_widget, flux_plot_widget,
                             sizing_mode='stretch_both')
 
-        self.template = FastListTemplate(site="Panel", title="VESPA Simulation "
-                                                             "Analysis",
-                                    main=[pn.Column(pn.pane.Markdown('## Spatial '
+        self.template = MaterialTemplate(title="VESPA Simulation Analysis",
+                                         theme=DarkTheme,
+                                    main=[pn.Column(pn.pane.Markdown('## Plot '
                                                                 'Components'),
-                                                    top_row, pn.Spacer( background='#1f1f1f', height=5),
-                                                    pn.pane.Markdown('## Plots '
+                                                    top_row,
+                                                    pn.Spacer( background='#ffffff',
+                                                               height=5),
+                                                    pn.pane.Markdown('## Spatial '
                                                                   'Components'),
                                                             bottom_row)],
                                     sidebar=[pn.pane.Markdown('## Date Range'),
@@ -455,7 +527,7 @@ class Dashboard(param.Parameterized):
                                              pn.pane.Markdown('### Choose the '
                                                               'particular date to '
                                                               'view spatial data'),
-                                             self.date_slider]
+                                             self.date_slider],
                                     )
 
         return self.template
