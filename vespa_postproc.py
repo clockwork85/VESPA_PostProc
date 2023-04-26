@@ -4,7 +4,8 @@ import concurrent.futures
 from datetime import date, datetime, time
 import logging
 import glob
-from typing import List, Dict, Tuple
+import re
+from typing import List, Dict, Tuple, Union
 
 from bokeh.layouts import gridplot
 from bokeh.models import ColumnDataSource
@@ -219,6 +220,17 @@ def compute_fsd_averages_by_material_id(
 
     return avg_temps_df
 
+def build_image_dataframe(images: List[str], start_year: int, column_prefix: str =
+    "Imagery") -> pd.DataFrame:
+
+    datetime_file_dict = { image_filename_to_datetime(filename, start_year): filename
+                           for filename in images }
+    image_series = pd.Series(datetime_file_dict)
+    image_series.sort_index(inplace=True)
+
+    image_series.name = column_prefix
+
+    return image_series
 
 def build_fsd_dataframe(
     file_averages: Dict[str, pd.Series],
@@ -243,12 +255,26 @@ def fsd_filename_to_datetime(filename: str, start_year: int) -> pd.Timestamp:
     date = pd.to_datetime(start_year * 1000 + day_of_year, format="%Y%j")
     return date + pd.to_timedelta(hour, unit="h")
 
+def image_filename_to_datetime(filename: str, start_year: int) -> pd.Timestamp:
+    date_pattern = r'\d{6}'
+    day_of_year_and_hour = int(re.search(date_pattern, filename).group(0))
+    day_of_year = day_of_year_and_hour // 1000
+    hour = day_of_year_and_hour % 100
+
+    date = pd.to_datetime(start_year * 1000 + day_of_year, format="%Y%j")
+    return date + pd.to_timedelta(hour, unit="h")
+
 
 def merge_dataframes_on_datetime(
-    *dataframes: pd.DataFrame, how: str = "inner"
+    *dataframes_and_series: Union[pd.DataFrame, pd.Series], how: str = "inner"
 ) -> pd.DataFrame:
-    if len(dataframes) < 2:
+    if len(dataframes_and_series) < 2:
         raise ValueError("At least two DataFrames are required for merging.")
+
+    dataframes = [
+        obj.to_frame() if isinstance(obj, pd.Series) else obj
+        for obj in dataframes_and_series
+    ]
 
     merged_data = dataframes[0].join(dataframes[1:], how=how)
     return merged_data
@@ -257,9 +283,10 @@ def merge_dataframes_on_datetime(
 def read_image_panel(image_path: str) -> pn.pane.JPG:
     return pn.pane.JPG(image_path, width=500, height=500)
 
-def display_images(image_paths: List[str]) -> pn.Column:
-    image_panes = [read_image_panel(image_path) for image_path in image_paths]
-    return pn.Column(*image_panes)
+def display_image(image_path: str) -> pn.Column:
+    # image_panes = [read_image_panel(image_path) for image_path in image_paths]
+    image_pane = read_image_panel(image_path)
+    return image_pane
 
 def image_histogram(image_path: str, bins: int = 5):
 
@@ -308,10 +335,13 @@ def plot_mesh(mesh_file: str) -> pv.Plotter:
     return plotter
 
 def numpy_datetime64_to_datetime(dt64: np.datetime64) -> datetime:
+    if isinstance(dt64, datetime):
+        return dt64
     if isinstance(dt64, date):
         return datetime.combine(dt64, datetime.min.time())
     ts = (dt64.astype('datetime64[s]') - np.datetime64('1970-01-01T00:00:00', 's')) / np.timedelta64(1, 's')
     return datetime.utcfromtimestamp(ts)
+
 def create_met_plot(source: ColumnDataSource, met_column: str,
                     legend_label: str, y_axis_label: str, span_line: Span) -> figure:
     title = f"{met_column.capitalize()} vs. Date"
@@ -331,7 +361,7 @@ def create_variable_plot(source: ColumnDataSource, columns: List[str], title: st
                          y_axis_label: str, span_line: Span) -> figure:
     var_plot = figure(title=title, x_axis_type='datetime', x_axis_label='Date',
                       y_axis_label=y_axis_label)
-    colors = ["blue", "red", "green", "purple", "orange", "cyan", "magenta"]
+    colors = ["blue", "green", "orange", "cyan", "magenta", "purple", "brown", "pink"]
     for i, column in enumerate(columns):
         var_plot.line(x='index', y=column, source=source, line_width=2,
                       color=colors[i], legend_label=column)
@@ -345,10 +375,11 @@ def create_variable_plot(source: ColumnDataSource, columns: List[str], title: st
 
 
 class Dashboard(param.Parameterized):
-    def __init__(self, source: ColumnDataSource, **params):
+    def __init__(self, source: ColumnDataSource, spatial_df: pd.DataFrame, **params):
         super().__init__(**params)
         self.source = source
         self.filtered_source = ColumnDataSource(data=self.source.data)
+        self.spatial_df = spatial_df
 
         self.date_range_slider = pn.widgets.DateRangeSlider(
             name='Range', start=source.data['index'][0],
@@ -370,57 +401,47 @@ class Dashboard(param.Parameterized):
                                                  value='Temp')
 
         initial_date_value = self.date_slider.value
-        print(f"{initial_date_value=}")
-        if self.filtered_source.data['index'].min() <= initial_date_value <= \
+        if not self.filtered_source.data['index'].min() <= initial_date_value <= \
                 self.filtered_source.data['index'].max():
-            print(f"Span location is within range of filtered source")
-        else:
             print(f"Span location is NOT within range of filtered source")
             print(f"{self.filtered_source.data['index'].min()=}")
             print(f"{self.filtered_source.data['index'].max()=}")
             print(f"{initial_date_value=}")
 
         self.span_line = Span(location=initial_date_value, dimension='height',
-                              line_color='red', line_dash='dashed', line_width=3)
+                              line_color='red', line_dash='dashed', line_width=1)
+
+        self.current_datetime = initial_date_value
+
+        self.current_datetime_text =  pn.widgets.StaticText(name='Displaying Spatial '
+                                                                 'for Date ',
+                                                            value=self.current_datetime_string())
+        self.spatial_current_button = pn.widgets.Button(name='Render Current '
+                                                             'Date Spatial Components',
+                                                        button_type='primary')
+        self.bottom_row = None
 
         # Bind date range slider to update filtered source
         self.date_range_slider.param.watch(self.update_filtered_source, 'value')
-        self.date_slider.param.watch(self.update_plots, 'value')
+        self.date_slider.param.watch(self.update_span_line, 'value')
+        self.date_slider.param.watch(self.update_current_datetime, 'value')
 
-        # self.date_slider.js_on_change('value', CustomJS(args=dict(span_line=self.span_line), code="""
-        #     let date_value = cb_obj.value;
-        #     let dt_value = new Date(date_value);
-        #     let span_location = dt_value.getTime();
-        #     span_line.location = span_location;
-        #     console.log(`From inside CustomJS: ${span_location}`);
-        # """))
+    @pn.depends("date_range_slider.param.value")
+    def update_date_slider(self, event):
+        date_range = event.new
+        start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
+        self.date_slider.start = start
+        self.date_slider.end = end
+        if self.date_slider.value < start:
+            self.date_slider.value = start
+        elif self.date_slider.value > end:
+            self.date_slider.value = end
 
     @pn.depends("date_slider.param.value")
     def update_span_line(self, date_event):
-        print(f"{date_event=}")
-        print(f"{self.date_slider.value=}")
         date_value = np.datetime64(self.date_slider.value)
-        print(f"From inside update_span_line: {date_value=}")
         self.span_line = Span(location=date_value, dimension='height',
-                              line_color='red', line_dash='dashed', line_width=3)
-        print(f"From inside update_span_line: {self.span_line=}")
-
-    def update_plots(self, event):
-        self.update_span_line(event)
-        self.temperature_plot(event)
-        self.flux_plot(event)
-        self.update_met_plot(self.met_variable_select.value,
-                             self.date_slider.value, event)
-
-    # @pn.depends("date_slider.param.value")
-    # def update_span_line(self, date_event):
-    #     date_value = date_event.new
-    #     print(f"From inside update_span_line: {date_value=}")
-    #     span_location = dt_value.timestamp() * 1000
-    #     self.span_line.location = span_location
-    #     # return span_location
-    #     print(f"From inside update_span_line: {span_location=}")
-
+                              line_color='red', line_dash='dashed', line_width=1)
 
     @pn.depends("date_range_slider.param.value")
     def update_filtered_source(self, event):
@@ -428,6 +449,7 @@ class Dashboard(param.Parameterized):
         start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
         mask = (self.source.data['index'] >= start) & (self.source.data['index'] <= end)
         self.filtered_source.data = {key: value[mask] for key, value in self.source.data.items()}
+        self.update_date_slider(event)
 
     @pn.depends("met_variable_select.param.value", "date_slider.param.value")
     def update_met_plot(self, met_variable: str,  date: np.datetime64, event=None) -> \
@@ -435,8 +457,6 @@ class Dashboard(param.Parameterized):
         met_column = met_variable
         y_axis_label = met_variable
         legend_label = met_variable
-        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
-        #                                  time.min).timestamp() * 1000
         return create_met_plot(self.filtered_source, met_column, legend_label,
                                y_axis_label, self.span_line)
 
@@ -444,8 +464,6 @@ class Dashboard(param.Parameterized):
     def temperature_plot(self, date: np.datetime64) -> pn.layout:
         title = 'Temperature vs. Date'
         y_axis_label = 'Temperature (°C)'
-        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
-        #                                  time.min).timestamp() * 1000
         return create_variable_plot(self.filtered_source,
                                     [x for x in self.filtered_source.data.keys()
                                         if x.startswith('Temperature')],
@@ -455,14 +473,41 @@ class Dashboard(param.Parameterized):
     def flux_plot(self, date: np.datetime64) -> pn.layout:
         title = 'Flux vs. Date'
         y_axis_label = 'Flux (W/m^2)'
-        # span_location = datetime.combine(numpy_datetime64_to_datetime(date),
-        #                                  time.min).timestamp() * 1000
         return create_variable_plot(self.filtered_source,
                                     [x for x in self.filtered_source.data.keys()
                                                   if x.startswith('Flux')],
                                     title, y_axis_label, self.span_line)
 
+    @pn.depends("date_slider.param.value")
+    def update_current_datetime(self, date_event: np.datetime64):
+        date = date_event.new
+        date_dt = numpy_datetime64_to_datetime(date)
+        self.current_datetime = date_dt
+
+    def current_datetime_string(self):
+        print(f"From current_datetime_string: {self.current_datetime=}")
+        date_dt = numpy_datetime64_to_datetime(self.current_datetime)
+        return f'{date_dt:%Y-%m-%d %H:%M}'
+
+    def on_spatial_current_datetime_change(self, event):
+        self.current_datetime_text.value = self.current_datetime_string()
+        print(f"Clicked on spatial current datetime button at {self.current_datetime_string()}")
+        print(f"On click: {self.spatial_df.loc[self.current_datetime]['Imagery']=}")
+        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+        new_image_pane = display_image(curr_image)
+        self.image_pane = pn.Column(new_image_pane)
+        new_hist_pane = image_histogram(curr_image)
+        self.image_hist = pn.Column(new_hist_pane, sizing_mode='stretch_both')
+        self.bottom_row[0] = self.image_pane
+        self.bottom_row[1] = self.image_hist
+        print(f"On spatial after click: {self.image_pane=}")
+        print(f"On spatial after click type: {type(self.image_pane)=}")
+
+
     def view(self):
+
+        # Button
+        self.spatial_current_button.on_click(self.on_spatial_current_datetime_change)
 
         # Plots
         met_plot = pn.panel(pn.bind(self.update_met_plot, self.met_variable_select,
@@ -491,51 +536,59 @@ class Dashboard(param.Parameterized):
                             height=200)
 
         # Image Plot
-        image_pane = display_images(["data/Scenario1_181011_LWIR.jpg"])
-        image_pane.sizing_mode = 'stretch_both'
-        image_pane.width = 100
-        image_pane.height = 100
+        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+        self.image_pane = pn.Column(display_image(curr_image))
+        self.image_pane.sizing_mode = 'stretch_both'
+        self.image_pane.width = 100
+        self.image_pane.height = 100
 
         # Image Histogram Plot
-        image_hist = image_histogram("data/Scenario1_181011_LWIR.jpg")
-        image_hist.sizing_mode = 'stretch_both'
-        image_hist.width = 100
-        image_hist.height = 100
+        self.image_hist = pn.Column(image_histogram(curr_image),
+                                    sizing_mode='stretch_both')
+        self.image_hist.sizing_mode = 'stretch_both'
+        self.image_hist.width = 100
+        self.image_hist.height = 100
 
-        bottom_row = pn.Row(image_pane, image_hist, vtk_pane,
+        self.bottom_row = pn.Row(self.image_pane, self.image_hist, vtk_pane,
                          sizing_mode='stretch_both')
         top_row = pn.Row(met_plot_widget, temp_plot_widget, flux_plot_widget,
                             sizing_mode='stretch_both')
 
         self.template = MaterialTemplate(title="VESPA Simulation Analysis",
                                          theme=DarkTheme,
-                                    main=[pn.Column(pn.pane.Markdown('## Plot '
-                                                                'Components'),
+                                    main=[pn.Column(pn.pane.Markdown('## Plot Components'),
                                                     top_row,
                                                     pn.Spacer( background='#ffffff',
                                                                height=5),
-                                                    pn.pane.Markdown('## Spatial '
-                                                                  'Components'),
-                                                            bottom_row)],
+                                        pn.pane.Markdown('## Spatial Components'),
+                                                            self.bottom_row)],
                                     sidebar=[pn.pane.Markdown('## Date Range'),
                                              pn.pane.Markdown('### Choose the date '
                                                               'range to graph the '
                                                               'data'),
                                              self.date_range_slider,
-                                             pn.Spacer(height=50),
+                                             pn.Spacer(height=35),
+                                             pn.layout.Divider(),
                                              pn.pane.Markdown('## Date'),
                                              pn.pane.Markdown('### Choose the '
                                                               'particular date to '
-                                                              'view spatial data'),
-                                             self.date_slider],
+                                                              'view'),
+                                             self.date_slider,
+                                             pn.Spacer(height=35),
+                                             pn.layout.Divider(),
+                                             pn.Spacer(height=15),
+                                             self.current_datetime_text,
+                                             pn.Spacer(height=15),
+                                             self.spatial_current_button]
                                     )
-
+        print(f"In View: {self.image_pane=}")
+        print(f"In View type: {type(self.image_pane)=}")
         return self.template
 
 if __name__ == "__main__":
     met = read_met("data/Scenario1.met")
     met_dt = set_met_index_to_datetime(met, 2022)
-    temp_data = compute_fsd_averages_by_material_id(
+    temp_df = compute_fsd_averages_by_material_id(
         "data/Scenario1_mats.2dm",
         glob.glob("data/file_sock300*.fsd"),
         2022,
@@ -543,7 +596,7 @@ if __name__ == "__main__":
     )
 
 
-    flux_data = compute_fsd_averages_by_material_id(
+    flux_df = compute_fsd_averages_by_material_id(
         "data/Scenario1_mats.2dm",
         glob.glob("data/file_sock200*.fsd"),
         2022,
@@ -551,39 +604,17 @@ if __name__ == "__main__":
         False,
     )
 
-    dfs = merge_dataframes_on_datetime(met_dt, temp_data, flux_data)
+    image_df = build_image_dataframe(
+        glob.glob("data/Scenario1*.jpg"),
+        2022,
+        "Imagery"
+    )
+
+    spatial_df = image_df.to_frame()
+
+    dfs = merge_dataframes_on_datetime(met_dt, temp_df, flux_df)
 
     source = ColumnDataSource(dfs)
 
-    # met_plot = create_met_plot(source, 'Temp', 'Air Temperature', 'Temp')
-    # temp_plot = create_variable_plot(source, ['Temperature_Ave_MatID_1',
-    #                                             'Temperature_Ave_MatID_2',
-    #                                             'Temperature_Ave_MatID_5'],
-    #                                             'Temperature', 'Temp')
-    # flux_plot = create_variable_plot(source, ['Flux_Ave_MatID_1',
-    #                                             'Flux_Ave_MatID_2',
-    #                                             'Flux_Ave_MatID_5'],
-    #                                             'Flux', 'Flux')
-    # Dashboard
-    # dashboard = pn.GridSpec(sizing_mode='stretch_both')
-    # plotter = plot_mesh("data/Scenario1_mats.2dm")
-    # vtk_pane = pn.panel(plotter.ren_win, width=1000, height=700)
-    # dashboard[:3, :2] = vtk_pane
-    # dashboard[3:6, 0] = display_images(["data/Scenario1_181011_LWIR.jpg"])
-    # image_hist = image_histogram("data/Scenario1_181011_LWIR.jpg")
-    # dashboard[3:6, 1] = image_hist
-    # dashboard[:2, 2] = met_plot
-    # dashboard[2:4, 2] = temp_plot
-    # dashboard[4:6, 2] = flux_plot
-    #
-    # dashboard.show()
-    dashboard = Dashboard(source)
+    dashboard = Dashboard(source, spatial_df)
     dashboard.view().show()
-
-
-
-    # temps_df = build_fsd_dataframe(temp_data, 2022, 'Temperature')
-    # fluxes_df = build_fsd_dataframe(flux_data, 2022, 'Flux')
-    #
-    # print(f"{temps_df.head()=}")
-    # print(f"{fluxes_df.head()=}")

@@ -11,8 +11,10 @@ DATA_DIR = Path("./data")
 from vespa_postproc import (
     add_year_column,
     build_fsd_dataframe,
+    build_image_dataframe,
     compute_fsd_averages_by_material_id,
     fsd_filename_to_datetime,
+    image_filename_to_datetime,
     merge_dataframes_on_datetime,
     parallel_read_and_average_fsd,
     parse_surface_mesh,
@@ -324,6 +326,11 @@ def test_fsd_filename_to_datetime():
     result = fsd_filename_to_datetime(filename, 2018)
     assert result == expected
 
+def test_image_filename_to_datetime():
+    filename = "Scenario1_180000_LWIR.jpg"
+    expected = pd.to_datetime("2018-06-29 00:00:00")
+    result = image_filename_to_datetime(filename, 2018)
+    assert result == expected
 
 def test_merge_dataframes_on_datetime():
     # Create sample DataFrames with a Datetime index
@@ -346,6 +353,21 @@ def test_merge_dataframes_on_datetime():
     expected_merged_data = pd.DataFrame(expected_data, index=expected_index)
 
     pd.testing.assert_frame_equal(merged_data, expected_merged_data)
+
+def test_build_image_dataframe():
+    images = ['Scenario1_181016_LWIR.jpg', 'Scenario1_181017_LWIR.jpg',
+              'Scenario1_181018_LWIR.jpg', 'Scenario1_181019_LWIR.jpg']
+    start_year = 2020
+
+    expected_result = pd.Series({
+        pd.Timestamp('2020-06-29 16:00:00'): 'Scenario1_181016_LWIR.jpg',
+        pd.Timestamp('2020-06-29 17:00:00'): 'Scenario1_181017_LWIR.jpg',
+        pd.Timestamp('2020-06-29 18:00:00'): 'Scenario1_181018_LWIR.jpg',
+        pd.Timestamp('2020-06-29 19:00:00'): 'Scenario1_181019_LWIR.jpg',
+    })
+
+    result = build_image_dataframe(images, start_year)
+    pd.testing.assert_series_equal(result, expected_result)
 
 def test_merge_dataframes_on_datetime_invalid_input():
     with pytest.raises(
