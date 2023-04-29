@@ -208,6 +208,7 @@ lava_colors = np.array([
  [  9.83762827,  103.0557617, 156.36600174],
  [184.55280045, 44.67032852, 62.23627677],
  [245.13487585, 206.94384876, 102.99520316],
+ [255, 255, 254],
  ]) / 255.0
 lava_cmap = LinearSegmentedColormap.from_list("lava", lava_colors)
 
@@ -217,35 +218,39 @@ artic_colors = np.array([
  [ 11.95211363, 106.38219989, 249.95229184],
  [ 69.35668876, 214.25351684, 223.594346  ],
  [161.59732831, 126.56277486, 73.18486923],
+ [245.13487585, 206.94384876, 102.99520316],
+ [255, 255, 254],
 ]) / 255.0
 artic_cmap = LinearSegmentedColormap.from_list("artic", artic_colors)
 
-#, Example, usage, x, = np.linspace(0, 1, 100),
-x = np.linspace(0, 1, 100)
-y = np.linspace(0, 1, 100)
-X, Y = np.meshgrid(x, y)
-Z = np.sin(X) * np.sin(Y)
+if __name__ == '__main__':
 
-fig, axs = plt.subplots(2, 4, figsize=(24, 8))
-axs[0][0].imshow(Z, cmap=ironbow_cmap)
-axs[0][0].set_title('Ironbow')
-axs[0][1].imshow(Z, cmap=flir_cmap)
-axs[0][1].set_title('Flir')
-axs[0][2].imshow(Z, cmap=rainbow1234_cmap)
-axs[0][2].set_title('Rainbow1234')
-axs[0][3].imshow(Z, cmap=yellow_cmap)
-axs[0][3].set_title('Yellow')
-axs[1][0].imshow(Z, cmap=white_hot_cmap)
-axs[1][0].set_title('White Hot')
-axs[1][1].imshow(Z, cmap=black_hot_cmap)
-axs[1][1].set_title('Black Hot')
-axs[1][2].imshow(Z, cmap=lava_cmap)
-axs[1][2].set_title('Lava')
-axs[1][3].imshow(Z, cmap=artic_cmap)
-axs[1][3].set_title('')
+    #, Example, usage, x, = np.linspace(0, 1, 100),
+    x = np.linspace(0, 1, 100)
+    y = np.linspace(0, 1, 100)
+    X, Y = np.meshgrid(x, y)
+    Z = np.sin(X) * np.sin(Y)
+
+    fig, axs = plt.subplots(2, 4, figsize=(24, 8))
+    axs[0][0].imshow(Z, cmap=ironbow_cmap)
+    axs[0][0].set_title('Ironbow')
+    axs[0][1].imshow(Z, cmap=flir_cmap)
+    axs[0][1].set_title('Flir')
+    axs[0][2].imshow(Z, cmap=rainbow1234_cmap)
+    axs[0][2].set_title('Rainbow1234')
+    axs[0][3].imshow(Z, cmap=yellow_cmap)
+    axs[0][3].set_title('Yellow')
+    axs[1][0].imshow(Z, cmap=white_hot_cmap)
+    axs[1][0].set_title('White Hot')
+    axs[1][1].imshow(Z, cmap=black_hot_cmap)
+    axs[1][1].set_title('Black Hot')
+    axs[1][2].imshow(Z, cmap=lava_cmap)
+    axs[1][2].set_title('Lava')
+    axs[1][3].imshow(Z, cmap=artic_cmap)
+    axs[1][3].set_title('')
 
 
-plt.show()
+    plt.show()
 # This code creates custom color maps for Ironbow, White Hot, and Black Hot FLIR color palettes using Matplotlib's LinearSegmentedColormap. The example usage part of the code displays a simple 2D plot using these color maps.
 
 # You can create custom color maps for the remaining FLIR color palettes in a similar way. Once you have the custom color maps, you can use them in the HoloViz Panel dashboard to display the image and the histogram with the desired color palettes. Remember to convert the Matplotlib colormaps to HoloViews-compatible colormaps before using them in the dashboard.
