@@ -428,78 +428,238 @@ def create_variable_plot(source: ColumnDataSource, columns: List[str], title: st
     var_plot.legend.click_policy = 'hide'
     return var_plot
 
-
-class Dashboard(param.Parameterized):
-    source: ColumnDataSource  = param.Parameter()
+class DashboardModel(param.Parameterized):
+    source: ColumnDataSource = param.Parameter()
     spatial_df: pd.DataFrame = param.Parameter()
-    def __init__(self, source: ColumnDataSource, spatial_df: pd.DataFrame, **params):
-        super().__init__(**params)
-        self.source = source
-        self.filtered_source = ColumnDataSource(data=self.source.data)
-        self.spatial_df = spatial_df
 
+    def __init__(self, source: ColumnDataSource, spatial_df: pd.DataFrame,
+                 mesh_file: str):
+        super().__init__()
+        self.source = source
+        self.spatial_df = spatial_df
+        self.filtered_source = ColumnDataSource(data=self.source.data)
+        self.mesh = read_2dm_pyvista(mesh_file)
+        self.current_datetime = None
+        self.mat_palette_colors = viridis(self.highest_matid)
+
+    # Properties
+    @property
+    def highest_matid(self) -> int:
+        matid_cols = [col for col in self.source.data.keys() if
+                      'Temperature_Ave_MatID_' in col]
+        return max([int(col.split('_')[-1]) for col in matid_cols])
+
+    def update_filtered_source(self, date_range: Tuple[datetime, datetime]):
+        date_range_new = date_range.new
+        start, end = np.datetime64(date_range_new[0]), np.datetime64(date_range_new[1])
+        mask = (self.source.data['index'] >= start) & (self.source.data['index'] <= end)
+        self.filtered_source.data = {k: v[mask] for k, v in self.source.data.items()}
+
+    def update_mat_palette(self, mat_palette: param.Event):
+        mat_palette_new = mat_palette.new
+        if mat_palette_new == 'Viridis':
+            # MatIDs are never negative or zero so subtract one for indexing
+            self.mat_palette_colors = viridis(self.highest_matid)
+        elif mat_palette_new == 'Set2_8':
+            self.mat_palette_colors = Set2_8
+
+    def update_vtk_mat_palette(self, mat_palette: str):
+        print(f"From inside VTK mat palette: {mat_palette=}")
+        mat_palette_new = mat_palette.new
+        if mat_palette_new == 'Viridis':
+            self.vtk_mat_palette_colors = ListedColormap(viridis(self.highest_matid))
+        elif mat_palette_new == 'Set2_8':
+            truncated_cmap = Set2_8[:self.highest_matid]
+            self.vtk_mat_palette_colors = ListedColormap(truncated_cmap)
+        else:
+            raise ValueError('Invalid Mat Palette')
+
+    def update_current_datetime(self, date_event: np.datetime64):
+        date = date_event.new
+        date_dt = numpy_datetime64_to_datetime(date)
+        self.current_datetime = date_dt
+
+    def update_temperatures(self):
+        temps = read_fsd(self.spatial_df.loc[self.current_datetime]['Surface '
+                                                                    'Temperature'])
+        self.mesh.point_data['Temperature'] = np.array(temps, dtype=float)
+
+
+class DashboardView(param.Parameterized):
+    model: DashboardModel = param.Parameter()
+
+    def __init__(self, model: DashboardModel):
+        super().__init__()
+        self.model = model
         self.date_range_slider = self.init_date_range_slider()
         self.date_slider = self.init_date_slider()
         self.met_variable_select = self.init_met_variable_select()
         self.mat_palette_select = self.init_mat_palette_select()
         self.image_color_palette_select = self.init_image_color_palette_select()
         self.image_hist_bin_number_widget = self.init_image_hist_bin_number_widget()
-        self.vtk_cell_array_select = self.init_vtk_cell_array_select()
-        initial_date_value = self.date_slider.value
-
-        self.span_line = Span(location=initial_date_value, dimension='height',
-                              line_color='red', line_dash='dashed', line_width=1)
-
-        self.current_datetime = initial_date_value
-
+        self.vtk_array_select = self.init_vtk_array_select()
+        self.model.current_datetime = self.date_slider.value
         self.current_datetime_text = self.init_current_datetime_text()
         self.spatial_current_button = self.init_spatial_current_button()
+        self.span_line = Span(location=self.date_slider.value, dimension='height',
+                              line_color='red', line_dash='dashed', line_width=1)
+        self.mat_palette_colors = viridis(self.model.highest_matid)
+        self.plotter = plot_mesh(self.model.mesh)
 
-        self.bottom_row = None
+    @property
+    def current_datetime_string(self) -> str:
+        print(f"From inside current_datetime_string: {self.model.current_datetime=}")
+        date_dt = numpy_datetime64_to_datetime(self.model.current_datetime)
+        return f'{date_dt:%Y-%m-%d %H:%M}'
 
-        # Bind date range slider to update filtered source
-        self.date_range_slider.param.watch(self.update_filtered_source, 'value')
-        self.date_slider.param.watch(self.update_span_line, 'value')
-        self.date_slider.param.watch(self.update_current_datetime, 'value')
-        self.image_color_palette_select.param.watch(self.update_image_pane, 'value')
-        self.image_hist_bin_number_widget.param.watch(self.update_image_hist_pane,
-                                                      'value_throttled')
-        self.vtk_cell_array_select.param.watch(self.update_vtk_pane, 'value')
-        self.mat_palette_colors = viridis(self.highest_matid)
-        self.mat_palette_select.param.watch(self.update_mat_palette, 'value')
-        self.mat_palette_select.param.watch(self.update_vtk_pane, 'value')
+    # Methods
+    def update_span_line(self, event: param.Event):
+        date_value = np.datetime64(event.new)
+        self.span_line.location = date_value
 
-    def init_date_range_slider(self):
-         return pn.widgets.DateRangeSlider(name='Date Range',
-                                           start=self.source.data['index'][0],
-                                           end=self.source.data['index'][-1],
-                                           value=(self.source.data['index'][0],
-                                           self.source.data['index'][-1]),
-                                           step=60 * 60 * 1000,
-                                           tooltips=True,
-                                           format='%Y-%m-%d %H:%M')
+    def create_image_pane(self):
+        curr_image = self.model.spatial_df.loc[self.model.current_datetime]['Imagery']
+        new_image_pane = read_image_panel(curr_image,
+                                          palette=self.image_color_palette_select.value)
+        return pn.Column(self.image_color_palette_select, new_image_pane,
+                         sizing_mode='stretch_both', height=100, width=100)
 
-    def init_date_slider(self):
+    def create_image_hist_pane(self):
+        curr_image = self.model.spatial_df.loc[self.model.current_datetime]['Imagery']
+        new_image_hist_pane = image_histogram(curr_image,
+                                          bins=self.image_hist_bin_number_widget.value)
+        return pn.Column(self.image_hist_bin_number_widget, new_image_hist_pane,
+                         sizing_mode='stretch_both', height=100, width=100)
+
+    def create_vtk_pane(self):
+        return pn.Column(self.vtk_array_select, pn.panel(self.plotter.ren_win,
+                                                              sizing_mode='stretch_both',
+                                                              enable_keybindings=True,
+                                                              orientation_widget=True),
+                         sizing_mode='stretch_both', height=200, width=200)
+
+    @pn.depends("met_variable_select.param.value", "date_slider.param.value")
+    def met_plot(self, met_variable: str, date: np.datetime64) -> pn.layout:
+        met_plot = create_met_plot(source=self.model.filtered_source, met_column=met_variable,
+                                   y_axis_label=met_variable, span_line=self.span_line,
+                                   legend_label=met_variable)
+        return met_plot
+
+    @pn.depends("mat_palette_select.param.value", "date_slider.param.value")
+    def temperature_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
+        title = 'Temperature vs. Date'
+        y_axis_label = 'Temperature (°C)'
+        temp_cols = [col for col in self.model.filtered_source.data.keys() if
+                        'Temperature_Ave_MatID_' in col]
+        return create_variable_plot(self.model.filtered_source, temp_cols, title,
+                                    y_axis_label, self.span_line,
+                                    self.model.mat_palette_colors)
+
+    @pn.depends("mat_palette_select.param.value", "date_slider.param.value")
+    def flux_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
+        title = 'Flux vs. Date'
+        y_axis_label = 'Flux (W/m^2)'
+        flux_cols = [col for col in self.model.filtered_source.data.keys() if
+                        'Flux_Ave_MatID_' in col]
+        return create_variable_plot(self.model.filtered_source, flux_cols, title,
+                                    y_axis_label, self.span_line,
+                                    self.model.mat_palette_colors)
+
+    def update_vtk_pane_with_new_mesh(self):
+        vtk_array = self.vtk_array_select.value
+        if vtk_array == 'Temperature':
+            title = 'Temperature (°C)'
+            cmap = 'plasma'
+        elif vtk_array == 'MatID':
+            title = 'Material ID'
+            cmap = self.model.vtk_mat_palette_colors
+        else:
+            raise ValueError('Invalid VTK Array')
+        print(f"Updating VTK Pane with {vtk_array} and colormap {cmap}")
+        self.plotter.remove_actor(self.plotter.renderer.GetActors().GetLastActor())
+        self.plotter.add_mesh(self.model.mesh,
+                              scalars=vtk_array, cmap=cmap,
+                              show_scalar_bar=True, scalar_bar_args=dict(title=title),
+                              name=vtk_array)
+    def view(self):
+        # Top Row Widgets
+        self.met_plot_widget = pn.Column(self.met_variable_select, self.met_plot_bind,
+                                            sizing_mode='stretch_both', height=200, width=200)
+        self.temp_plot_widget = pn.Column(self.mat_palette_select, self.temp_plot_bind,
+                                            sizing_mode='stretch_both', height=200, width=200)
+        self.flux_plot_widget = pn.Column(self.flux_plot_bind,
+                                            sizing_mode='stretch_both', height=200, width=200)
+        # Bottom row Widgets
+        self.image_pane = self.create_image_pane()
+        self.image_hist_pane = self.create_image_hist_pane()
+        self.vtk_pane = self.create_vtk_pane()
+
+        self.bottom_row = pn.Row(self.image_pane, self.image_hist_pane, self.vtk_pane,
+                                    sizing_mode='stretch_both')
+        self.top_row = pn.Row(self.met_plot_widget, self.temp_plot_widget, self.flux_plot_widget,
+                                sizing_mode='stretch_both')
+
+        self.template = MaterialTemplate(title='VESPA Simulation Analysis',
+                                         theme=DarkTheme,
+                                         main=[pn.Column(
+                                               pn.pane.Markdown('## Plot Components'),
+                                               self.top_row,
+                                               pn.Spacer(background='#ffffff',
+                                                         height=5),
+                                               pn.pane.Markdown('## Spatial Components'),
+                                               self.bottom_row)],
+                                         sidebar=[pn.pane.Markdown('## Date Range'),
+                                                  pn.pane.Markdown('### Choose the '
+                                                                   'date range to '
+                                                                   'graph the data'),
+                                                  self.date_range_slider,
+                                                  pn.Spacer(height=35),
+                                                  pn.layout.Divider(),
+                                                  pn.pane.Markdown('## Date'),
+                                                  pn.pane.Markdown('### Choose the '
+                                                                   'particular date '
+                                                                   'to view'),
+                                                  self.date_slider,
+                                                  pn.Spacer(height=35),
+                                                  pn.layout.Divider(),
+                                                  pn.Spacer(height=15),
+                                                  self.current_datetime_text,
+                                                  pn.Spacer(height=15),
+                                                  self.spatial_current_button]
+                                         )
+        return self.template
+
+    def init_date_range_slider(self) -> pn.widgets.DateRangeSlider:
+        return pn.widgets.DateRangeSlider(name='Date Range',
+                                          start=self.model.source.data['index'][0],
+                                          end=self.model.source.data['index'][-1],
+                                          value=(self.model.source.data['index'][0],
+                                                 self.model.source.data['index'][-1]),
+                                          step=60 * 60 * 1000,
+                                          tooltips=True,
+                                          format='%Y-%m-%d %H:%M')
+
+    def init_date_slider(self) -> pn.widgets.DateSlider:
         return pn.widgets.DateSlider(name='Date',
                                      as_datetime=True,
-                                     start=self.source.data['index'][0],
-                                     end=self.source.data['index'][-1],
-                                     value=self.source.data['index'][0],
+                                     start=self.model.source.data['index'][0],
+                                     end=self.model.source.data['index'][-1],
+                                     value=self.model.source.data['index'][0],
                                      step=60 * 60 * 1000,
                                      tooltips=True,
                                      format='%Y-%m-%d %H:%M')
 
-    def init_met_variable_select(self):
+    def init_met_variable_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='Met Variable',
                                  options=['Temp', 'RH', 'Global'],
                                  value='Temp')
 
-    def init_mat_palette_select(self):
+    def init_mat_palette_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='Material Palette',
                                  options=['Viridis', 'Set2_8'],
                                  value='Viridis')
 
-    def init_image_color_palette_select(self):
+    def init_image_color_palette_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='Image Color Palette',
                                  options=['flir',
                                           'rainbow1234',
@@ -513,275 +673,459 @@ class Dashboard(param.Parameterized):
                                  value='white hot',
                                  sizing_mode='fixed')
 
-    def init_image_hist_bin_number_widget(self):
+    def init_image_hist_bin_number_widget(self) -> pn.widgets.IntSlider:
         return pn.widgets.IntSlider(name='Image Histogram Bin Number',
                                     start=2, end=20, step=1, value=5)
 
-    def init_vtk_cell_array_select(self):
+    def init_vtk_array_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='VTK Cell Array',
                                  options=['MatID',
                                           'Temperature'],
                                  value='MatID',
                                  sizing_mode='fixed')
 
-    def init_current_datetime_text(self):
+    def init_current_datetime_text(self) -> pn.widgets.StaticText:
         return pn.widgets.StaticText(name='Displaying Spatial for Date ',
                                      value=self.current_datetime_string)
 
-    def init_spatial_current_button(self):
+    def init_spatial_current_button(self) -> pn.widgets.Button:
         return pn.widgets.Button(name='Render Current Date Spatial Components',
                                  button_type='primary')
 
-    @property
-    def highest_matid(self):
-        # Get the highest {num} Temperature_Ave_MatID_{num} columns
-        matid_cols = [col for col in self.source.data.keys() if
-                      'Temperature_Ave_MatID_' in col]
-        matid_nums = [int(col.split('_')[-1]) for col in matid_cols]
-        return max(matid_nums)
+class DashboardController(param.Parameterized):
+    model: DashboardModel = param.Parameter()
+    view: DashboardView = param.Parameter()
 
-    @property
-    def current_datetime_string(self) -> str:
-        date_dt = numpy_datetime64_to_datetime(self.current_datetime)
-        return f'{date_dt:%Y-%m-%d %H:%M}'
+    def __init__(self, model: DashboardModel, view: DashboardView):
+        super().__init__()
+        self.model = model
+        self.view = view
 
+        # Watch widgets for changes in model
+        self.view.date_range_slider.param.watch(self.model.update_filtered_source,
+                                              'value')
+        self.view.mat_palette_select.param.watch(self.model.update_mat_palette, 'value')
+        self.view.mat_palette_select.param.watch(self.model.update_vtk_mat_palette, 'value')
+        self.view.date_slider.param.watch(self.model.update_current_datetime, 'value')
 
-    @pn.depends("date_range_slider.param.value")
+        # Watch widgets for changes in view
+        self.view.date_slider.param.watch(self.view.update_span_line, 'value')
+        self.view.image_color_palette_select.param.watch(self.update_image_pane,
+                                                         'value')
+        self.view.image_hist_bin_number_widget.param.watch( self.update_image_hist_pane,
+                                                      'value_throttled')
+        self.view.vtk_array_select.param.watch(self.update_vtk_pane, 'value')
+        self.view.mat_palette_select.param.watch(self.update_vtk_pane, 'value')
+        self.view.date_range_slider.param.watch(self.update_date_slider,
+                                                'value_throttled')
+
+        # Button
+        self.view.spatial_current_button.on_click(
+            self.on_spatial_current_datetime_change)
+
+        self.view.met_plot_bind = pn.bind(self.view.met_plot,
+                                          self.view.met_variable_select,
+                                     self.view.date_slider.param.value)
+        self.view.temp_plot_bind = pn.bind(self.view.temperature_plot,
+                                      self.view.mat_palette_select,
+                                      self.view.date_slider.param.value)
+        self.view.flux_plot_bind = pn.bind(self.view.flux_plot,
+                                      self.view.mat_palette_select,
+                                      self.view.date_slider.param.value)
+
+    # Button callback
+    def on_spatial_current_datetime_change(self, event):
+        self.view.current_datetime_text.value = self.view.current_datetime_string
+        self.view.image_pane = self.view.create_image_pane()
+        self.view.image_hist_pane = self.view.create_image_hist_pane()
+        self.view.bottom_row[0] = self.view.image_pane
+        self.view.bottom_row[1] = self.view.image_hist_pane
+
     def update_date_slider(self, event):
         date_range = event.new
         start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
-        self.date_slider.start = start
-        self.date_slider.end = end
-        if self.date_slider.value < start:
-            self.date_slider.value = start
-        elif self.date_slider.value > end:
-            self.date_slider.value = end
+        self.view.date_slider.start = start
+        self.view.date_slider.end = end
+        if self.view.date_slider.value < start:
+            self.view.date_slider.value = start
+        if self.view.date_slider.value > end:
+            self.view.date_slider.value = end
 
-    @pn.depends("image_color_palette_select.param.value")
-    def update_image_pane(self, event=None):
-        palette = self.image_color_palette_select.value
-        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
-        new_image_pane = read_image_panel(curr_image, palette=palette)
-        self.image_pane = pn.Column(self.image_color_palette_select, new_image_pane,
-                                    sizing_mode='stretch_both', height=100, width=100)
-        self.bottom_row[0] = self.image_pane
+    def update_image_pane(self, event):
+        self.view.image_pane = self.view.create_image_pane()
+        self.view.bottom_row[0] = self.view.image_pane
 
-    @pn.depends("image_hist_bin_number_widget.param.value")
-    def update_image_hist_pane(self, event=None):
-        bin_number = self.image_hist_bin_number_widget.value
-        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
-        new_image_hist_pane = image_histogram(curr_image, bins=bin_number)
-        # print(f"Updating image hist pane with {bin_number} bins")
-        self.image_hist = pn.Column(self.image_hist_bin_number_widget,
-                                    new_image_hist_pane, sizing_mode='stretch_both',
-                                    height=100, width=100)
-        self.bottom_row[1] = self.image_hist
+    def update_image_hist_pane(self, event):
+        self.view.image_hist_pane = self.view.create_image_hist_pane()
+        self.view.bottom_row[1] = self.view.image_hist_pane
 
-    @pn.depends("mat_palette_colors.param.value", "vtk_cell_array_select.param.value")
-    def update_vtk_pane(self, mat_palette_colors, event=None):
-        vtk_array = self.vtk_cell_array_select.value
+    def update_vtk_pane(self, event):
+        vtk_array = self.view.vtk_array_select.value
+        print(f'Updating VTK Pane with {vtk_array}')
         if vtk_array == 'Temperature':
-            self.plotter.remove_actor(self.plotter.renderer.GetActors().GetLastActor())
-            temps = read_fsd(self.spatial_df.loc[self.current_datetime][
-                                 'Surface Temperature'])
-            self.mesh.point_data['Temperature'] = np.array(temps, dtype=float)
-            self.plotter.add_mesh(self.mesh, scalars='Temperature', cmap='plasma',
-                                    show_scalar_bar=True, scalar_bar_args=dict(
-                    title='Temperature (C)'), name='Temperature')
+            self.model.update_temperatures()
+            self.view.update_vtk_pane_with_new_mesh()
         elif vtk_array == 'MatID':
-            # bokeh_viridis = Set2_8
-            # rgba_colors = [tuple(np.array(color, dtype=float) / 255) for color in
-            #                bokeh_viridis]
-            if self.mat_palette_select.value == 'Viridis':
-                pyvista_cmap = ListedColormap(self.mat_palette_colors)
-            elif self.mat_palette_select.value == 'Set2_8':
-                bokeh_set2_8 = Set2_8[:self.highest_matid]
-                # rgba_colors = [to_rgba(color) for color in bokeh_set2_8]
-                # print(f"{rgba_colors=}")
-                pyvista_cmap = ListedColormap(bokeh_set2_8)
-            #print(f"Updating vtk color palette with {pyvista_cmap}")
-
-            self.plotter.remove_actor(self.plotter.renderer.GetActors().GetLastActor())
-            self.plotter.add_mesh(self.mesh, scalars='MatID',
-                                    show_scalar_bar=True,
-                                  cmap=pyvista_cmap, scalar_bar_args=dict(
-                    title='Material ID'), name='MatID')
-
-        self.vtk_pane = pn.Column(self.vtk_cell_array_select,
-                                  pn.panel(self.plotter.ren_win,
-                                           sizing_mode='stretch_both',
-                                           enable_keybindings=True, orientation_widget=True),
-                                  sizing_mode='stretch_both',
-                                  width=200, height=200)
-        self.bottom_row[2] = self.vtk_pane
+            self.view.update_vtk_pane_with_new_mesh()
+        else:
+            raise ValueError('Invalid VTK Array')
+        self.view.vtk_pane = self.view.create_vtk_pane()
+        self.view.bottom_row[2] = self.view.vtk_pane
 
 
-    @pn.depends("date_slider.param.value")
-    def update_span_line(self, date_event):
-        date_value = np.datetime64(self.date_slider.value)
-        self.span_line = Span(location=date_value, dimension='height',
-                              line_color='red', line_dash='dashed', line_width=1)
-
-    @pn.depends("date_range_slider.param.value")
-    def update_filtered_source(self, event):
-        date_range = event.new
-        start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
-        mask = (self.source.data['index'] >= start) & (self.source.data['index'] <= end)
-        self.filtered_source.data = {key: value[mask] for key, value in self.source.data.items()}
-        self.update_date_slider(event)
-
-    @pn.depends("met_variable_select.param.value", "date_slider.param.value")
-    def update_met_plot(self, met_variable: str,  date: np.datetime64, event=None) -> \
-            pn.layout:
-        met_column = met_variable
-        y_axis_label = met_variable
-        legend_label = met_variable
-        return create_met_plot(self.filtered_source, met_column, legend_label,
-                               y_axis_label, self.span_line)
-
-    @pn.depends("mat_palette_select.param.value")
-    def update_mat_palette(self, mat_palette):
-        mat_palette_new = mat_palette.new
-        # print(f"Updating mat palette to {mat_palette_new}")
-        if mat_palette_new == 'Viridis':
-            # MatID are never negative or zero so subract 1 for indexing
-            self.mat_palette_colors = viridis(self.highest_matid)
-        elif mat_palette_new == 'Set2_8':
-            self.mat_palette_colors = Set2_8
-
-    @pn.depends("mat_palette_colors.param.value", "date_slider.param.value")
-    def temperature_plot(self, mat_palette_colors, date: np.datetime64) -> pn.layout:
-        title = 'Temperature vs. Date'
-        y_axis_label = 'Temperature (°C)'
-        print(f"Updating temperature plot with {mat_palette_colors}")
-        print(f"Checking out if self is the same value {self.mat_palette_colors}")
-        return create_variable_plot(self.filtered_source,
-                                    [x for x in self.filtered_source.data.keys()
-                                        if x.startswith('Temperature')],
-                                    title, y_axis_label, self.span_line,
-                                    self.mat_palette_colors)
-
-    @pn.depends("mat_palette_colors.param.value", "date_slider.param.value")
-    def flux_plot(self, mat_palette_colors, date: np.datetime64) -> pn.layout:
-        title = 'Flux vs. Date'
-        y_axis_label = 'Flux (W/m^2)'
-        return create_variable_plot(self.filtered_source,
-                                    [x for x in self.filtered_source.data.keys()
-                                                  if x.startswith('Flux')],
-                                    title, y_axis_label, self.span_line,
-                                    self.mat_palette_colors)
-
-    @pn.depends("date_slider.param.value")
-    def update_current_datetime(self, date_event: np.datetime64):
-        date = date_event.new
-        date_dt = numpy_datetime64_to_datetime(date)
-        self.current_datetime = date_dt
-
-    def on_spatial_current_datetime_change(self, event):
-        self.current_datetime_text.value = self.current_datetime_string
-        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
-        new_image_pane = read_image_panel(curr_image, palette=self.image_color_palette_select.value)
-        self.image_pane = pn.Column(self.image_color_palette_select, new_image_pane,
-                                    sizing_mode='stretch_both', height=100, width=100)
-        new_hist_pane = image_histogram(curr_image,
-                                        bins=self.image_hist_bin_number_widget.value)
-        self.image_hist = pn.Column(self.image_hist_bin_number_widget, new_hist_pane,
-                                    sizing_mode='stretch_both')
-        self.bottom_row[0] = self.image_pane
-        self.bottom_row[1] = self.image_hist
-
-
-    def view(self):
-
-        # Button
-        self.spatial_current_button.on_click(self.on_spatial_current_datetime_change)
-
-        # Plots
-        self.met_plot = pn.bind(self.update_met_plot,
-                                          self.met_variable_select,
-                           self.date_slider.param.value, self.date_slider.param.value)
-        self.temp_plot = pn.bind(self.temperature_plot, self.mat_palette_select,
-                                     self.date_slider.param.value)
-        self.flux_plot = pn.bind(self.flux_plot, self.mat_palette_select,
-                                           self.date_slider.param.value)
-
-        # Widgets
-        self.met_plot_widget = pn.Column(self.met_variable_select, self.met_plot,
-                                    sizing_mode='stretch_both', width=500, height=400)
-
-        self.temp_plot_widget = pn.Column(self.mat_palette_select, self.temp_plot,
-                                     sizing_mode='stretch_both',
-                                     width=500,
-                                     height=400)
-
-        self.flux_plot_widget = pn.Column(pn.Spacer(height=50), self.flux_plot,
-                                     sizing_mode='stretch_both',
-                                     width=500,
-                                     height=400)
-
-        # Spatial VTK Plot
-        self.mesh = read_2dm_pyvista("data/Scenario1_mats.2dm")
-        self.plotter = plot_mesh(self.mesh)
-        self.vtk_plot = pn.panel(self.plotter.ren_win,
-                                 sizing_mode='stretch_both',
-                                 enable_keybindings=True, orientation_widget=True,
-                                 width=200, height=200)
-        self.vtk_pane = pn.Column(self.vtk_cell_array_select,
-                                    self.vtk_plot,
-                                    sizing_mode='stretch_both',
-                                    width=500, height=500)
-
-        # Image Plot
-        curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
-        self.image_pane = pn.Column(self.image_color_palette_select, read_image_panel(
-            curr_image, palette=self.image_color_palette_select.value),
-                                    sizing_mode='stretch_both', height=100, width=100)
-        self.image_pane.sizing_mode = 'stretch_both'
-        self.image_pane.width = 100
-        self.image_pane.height = 100
-
-        # Image Histogram Plot
-        self.image_hist = pn.Column(self.image_hist_bin_number_widget,
-                                    image_histogram(curr_image, bins=5),
-                                    sizing_mode='stretch_both')
-        self.image_hist.sizing_mode = 'stretch_both'
-        self.image_hist.width = 100
-        self.image_hist.height = 100
-
-        self.bottom_row = pn.Row(self.image_pane, self.image_hist, self.vtk_pane,
-                         sizing_mode='stretch_both')
-        top_row = pn.Row(self.met_plot_widget, self.temp_plot_widget,
-                         self.flux_plot_widget, sizing_mode='stretch_both')
-
-        self.template = MaterialTemplate(title="VESPA Simulation Analysis",
-                                         theme=DarkTheme,
-                                    main=[pn.Column(pn.pane.Markdown('## Plot Components'),
-                                                    top_row,
-                                                    pn.Spacer( background='#ffffff',
-                                                               height=5),
-                                        pn.pane.Markdown('## Spatial Components'),
-                                                            self.bottom_row),
-                                          ],
-                                    sidebar=[pn.pane.Markdown('## Date Range'),
-                                             pn.pane.Markdown('### Choose the date '
-                                                              'range to graph the '
-                                                              'data'),
-                                             self.date_range_slider,
-                                             pn.Spacer(height=35),
-                                             pn.layout.Divider(),
-                                             pn.pane.Markdown('## Date'),
-                                             pn.pane.Markdown('### Choose the '
-                                                              'particular date to '
-                                                              'view'),
-                                             self.date_slider,
-                                             pn.Spacer(height=35),
-                                             pn.layout.Divider(),
-                                             pn.Spacer(height=15),
-                                             self.current_datetime_text,
-                                             pn.Spacer(height=15),
-                                             self.spatial_current_button],
-                                    )
-        return self.template
+# class Dashboard(param.Parameterized):
+#     source: ColumnDataSource  = param.Parameter()
+#     spatial_df: pd.DataFrame = param.Parameter()
+#     def __init__(self, source: ColumnDataSource, spatial_df: pd.DataFrame, **params):
+#         super().__init__(**params)
+#         self.source = source
+#         self.filtered_source = ColumnDataSource(data=self.source.data)
+#         self.spatial_df = spatial_df
+#
+#         self.date_range_slider = self.init_date_range_slider()
+#         self.date_slider = self.init_date_slider()
+#         self.met_variable_select = self.init_met_variable_select()
+#         self.mat_palette_select = self.init_mat_palette_select()
+#         self.image_color_palette_select = self.init_image_color_palette_select()
+#         self.image_hist_bin_number_widget = self.init_image_hist_bin_number_widget()
+#         self.vtk_cell_array_select = self.init_vtk_cell_array_select()
+#         initial_date_value = self.date_slider.value
+#
+#         self.span_line = Span(location=initial_date_value, dimension='height',
+#                               line_color='red', line_dash='dashed', line_width=1)
+#
+#         self.current_datetime = initial_date_value
+#
+#         self.current_datetime_text = self.init_current_datetime_text()
+#         self.spatial_current_button = self.init_spatial_current_button()
+#
+#         self.bottom_row = None
+#
+#         # Bind date range slider to update filtered source
+#         self.date_range_slider.param.watch(self.update_filtered_source, 'value')
+#         self.date_slider.param.watch(self.update_span_line, 'value')
+#         self.date_slider.param.watch(self.update_current_datetime, 'value')
+#         self.image_color_palette_select.param.watch(self.update_image_pane, 'value')
+#         self.image_hist_bin_number_widget.param.watch(self.update_image_hist_pane,
+#                                                       'value_throttled')
+#         self.vtk_cell_array_select.param.watch(self.update_vtk_pane, 'value')
+#         self.mat_palette_colors = viridis(self.highest_matid)
+#         self.mat_palette_select.param.watch(self.update_mat_palette, 'value')
+#         self.mat_palette_select.param.watch(self.update_vtk_pane, 'value')
+#
+#     def init_date_range_slider(self):
+#          return pn.widgets.DateRangeSlider(name='Date Range',
+#                                            start=self.source.data['index'][0],
+#                                            end=self.source.data['index'][-1],
+#                                            value=(self.source.data['index'][0],
+#                                            self.source.data['index'][-1]),
+#                                            step=60 * 60 * 1000,
+#                                            tooltips=True,
+#                                            format='%Y-%m-%d %H:%M')
+#
+#     def init_date_slider(self):
+#         return pn.widgets.DateSlider(name='Date',
+#                                      as_datetime=True,
+#                                      start=self.source.data['index'][0],
+#                                      end=self.source.data['index'][-1],
+#                                      value=self.source.data['index'][0],
+#                                      step=60 * 60 * 1000,
+#                                      tooltips=True,
+#                                      format='%Y-%m-%d %H:%M')
+#
+#     def init_met_variable_select(self):
+#         return pn.widgets.Select(name='Met Variable',
+#                                  options=['Temp', 'RH', 'Global'],
+#                                  value='Temp')
+#
+#     def init_mat_palette_select(self):
+#         return pn.widgets.Select(name='Material Palette',
+#                                  options=['Viridis', 'Set2_8'],
+#                                  value='Viridis')
+#
+#     def init_image_color_palette_select(self):
+#         return pn.widgets.Select(name='Image Color Palette',
+#                                  options=['flir',
+#                                           'rainbow1234',
+#                                           'yellow',
+#                                           'white hot',
+#                                           'black hot',
+#                                           'artic',
+#                                           'plasma',
+#                                           'lava',
+#                                           ],
+#                                  value='white hot',
+#                                  sizing_mode='fixed')
+#
+#     def init_image_hist_bin_number_widget(self):
+#         return pn.widgets.IntSlider(name='Image Histogram Bin Number',
+#                                     start=2, end=20, step=1, value=5)
+#
+#     def init_vtk_cell_array_select(self):
+#         return pn.widgets.Select(name='VTK Cell Array',
+#                                  options=['MatID',
+#                                           'Temperature'],
+#                                  value='MatID',
+#                                  sizing_mode='fixed')
+#
+#     def init_current_datetime_text(self):
+#         return pn.widgets.StaticText(name='Displaying Spatial for Date ',
+#                                      value=self.current_datetime_string)
+#
+#     def init_spatial_current_button(self):
+#         return pn.widgets.Button(name='Render Current Date Spatial Components',
+#                                  button_type='primary')
+#
+#     @property
+#     def highest_matid(self):
+#         # Get the highest {num} Temperature_Ave_MatID_{num} columns
+#         matid_cols = [col for col in self.source.data.keys() if
+#                       'Temperature_Ave_MatID_' in col]
+#         matid_nums = [int(col.split('_')[-1]) for col in matid_cols]
+#         return max(matid_nums)
+#
+#     @property
+#     def current_datetime_string(self) -> str:
+#         date_dt = numpy_datetime64_to_datetime(self.current_datetime)
+#         return f'{date_dt:%Y-%m-%d %H:%M}'
+#
+#
+#     @pn.depends("date_range_slider.param.value")
+#     def update_date_slider(self, event):
+#         date_range = event.new
+#         start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
+#         self.date_slider.start = start
+#         self.date_slider.end = end
+#         if self.date_slider.value < start:
+#             self.date_slider.value = start
+#         elif self.date_slider.value > end:
+#             self.date_slider.value = end
+#
+#     @pn.depends("image_color_palette_select.param.value")
+#     def update_image_pane(self, event=None):
+#         palette = self.image_color_palette_select.value
+#         curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+#         new_image_pane = read_image_panel(curr_image, palette=palette)
+#         self.image_pane = pn.Column(self.image_color_palette_select, new_image_pane,
+#                                     sizing_mode='stretch_both', height=100, width=100)
+#         self.bottom_row[0] = self.image_pane
+#
+#     @pn.depends("image_hist_bin_number_widget.param.value")
+#     def update_image_hist_pane(self, event=None):
+#         bin_number = self.image_hist_bin_number_widget.value
+#         curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+#         new_image_hist_pane = image_histogram(curr_image, bins=bin_number)
+#         # print(f"Updating image hist pane with {bin_number} bins")
+#         self.image_hist = pn.Column(self.image_hist_bin_number_widget,
+#                                     new_image_hist_pane, sizing_mode='stretch_both',
+#                                     height=100, width=100)
+#         self.bottom_row[1] = self.image_hist
+#
+#     @pn.depends("mat_palette_colors.param.value", "vtk_cell_array_select.param.value")
+#     def update_vtk_pane(self, mat_palette_colors, event=None):
+#         vtk_array = self.vtk_cell_array_select.value
+#         if vtk_array == 'Temperature':
+#             self.plotter.remove_actor(self.plotter.renderer.GetActors().GetLastActor())
+#             temps = read_fsd(self.spatial_df.loc[self.current_datetime][
+#                                  'Surface Temperature'])
+#             self.mesh.point_data['Temperature'] = np.array(temps, dtype=float)
+#             self.plotter.add_mesh(self.mesh, scalars='Temperature', cmap='plasma',
+#                                     show_scalar_bar=True, scalar_bar_args=dict(
+#                     title='Temperature (C)'), name='Temperature')
+#         elif vtk_array == 'MatID':
+#             # bokeh_viridis = Set2_8
+#             # rgba_colors = [tuple(np.array(color, dtype=float) / 255) for color in
+#             #                bokeh_viridis]
+#             if self.mat_palette_select.value == 'Viridis':
+#                 pyvista_cmap = ListedColormap(self.mat_palette_colors)
+#             elif self.mat_palette_select.value == 'Set2_8':
+#                 bokeh_set2_8 = Set2_8[:self.highest_matid]
+#                 # rgba_colors = [to_rgba(color) for color in bokeh_set2_8]
+#                 # print(f"{rgba_colors=}")
+#                 pyvista_cmap = ListedColormap(bokeh_set2_8)
+#             #print(f"Updating vtk color palette with {pyvista_cmap}")
+#
+#             self.plotter.remove_actor(self.plotter.renderer.GetActors().GetLastActor())
+#             self.plotter.add_mesh(self.mesh, scalars='MatID',
+#                                     show_scalar_bar=True,
+#                                   cmap=pyvista_cmap, scalar_bar_args=dict(
+#                     title='Material ID'), name='MatID')
+#
+#         self.vtk_pane = pn.Column(self.vtk_cell_array_select,
+#                                   pn.panel(self.plotter.ren_win,
+#                                            sizing_mode='stretch_both',
+#                                            enable_keybindings=True, orientation_widget=True),
+#                                   sizing_mode='stretch_both',
+#                                   width=200, height=200)
+#         self.bottom_row[2] = self.vtk_pane
+#
+#
+#     @pn.depends("date_slider.param.value")
+#     def update_span_line(self, date_event):
+#         date_value = np.datetime64(self.date_slider.value)
+#         self.span_line = Span(location=date_value, dimension='height',
+#                               line_color='red', line_dash='dashed', line_width=1)
+#
+#     @pn.depends("date_range_slider.param.value")
+#     def update_filtered_source(self, event):
+#         date_range = event.new
+#         start, end = np.datetime64(date_range[0]), np.datetime64(date_range[1])
+#         mask = (self.source.data['index'] >= start) & (self.source.data['index'] <= end)
+#         self.filtered_source.data = {key: value[mask] for key, value in self.source.data.items()}
+#         self.update_date_slider(event)
+#
+#     @pn.depends("met_variable_select.param.value", "date_slider.param.value")
+#     def update_met_plot(self, met_variable: str,  date: np.datetime64, event=None) -> \
+#             pn.layout:
+#         met_column = met_variable
+#         y_axis_label = met_variable
+#         legend_label = met_variable
+#         return create_met_plot(self.filtered_source, met_column, legend_label,
+#                                y_axis_label, self.span_line)
+#
+#     @pn.depends("mat_palette_select.param.value")
+#     def update_mat_palette(self, mat_palette):
+#         mat_palette_new = mat_palette.new
+#         # print(f"Updating mat palette to {mat_palette_new}")
+#         if mat_palette_new == 'Viridis':
+#             # MatID are never negative or zero so subract 1 for indexing
+#             self.mat_palette_colors = viridis(self.highest_matid)
+#         elif mat_palette_new == 'Set2_8':
+#             self.mat_palette_colors = Set2_8
+#
+#     @pn.depends("mat_palette_colors.param.value", "date_slider.param.value")
+#     def temperature_plot(self, mat_palette_colors, date: np.datetime64) -> pn.layout:
+#         title = 'Temperature vs. Date'
+#         y_axis_label = 'Temperature (°C)'
+#         print(f"Updating temperature plot with {mat_palette_colors}")
+#         print(f"Checking out if self is the same value {self.mat_palette_colors}")
+#         return create_variable_plot(self.filtered_source,
+#                                     [x for x in self.filtered_source.data.keys()
+#                                         if x.startswith('Temperature')],
+#                                     title, y_axis_label, self.span_line,
+#                                     self.mat_palette_colors)
+#
+#     @pn.depends("mat_palette_colors.param.value", "date_slider.param.value")
+#     def flux_plot(self, mat_palette_colors, date: np.datetime64) -> pn.layout:
+#         title = 'Flux vs. Date'
+#         y_axis_label = 'Flux (W/m^2)'
+#         return create_variable_plot(self.filtered_source,
+#                                     [x for x in self.filtered_source.data.keys()
+#                                                   if x.startswith('Flux')],
+#                                     title, y_axis_label, self.span_line,
+#                                     self.mat_palette_colors)
+#
+#     @pn.depends("date_slider.param.value")
+#     def update_current_datetime(self, date_event: np.datetime64):
+#         date = date_event.new
+#         date_dt = numpy_datetime64_to_datetime(date)
+#         self.current_datetime = date_dt
+#
+#     def on_spatial_current_datetime_change(self, event):
+#         self.current_datetime_text.value = self.current_datetime_string
+#         curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+#         new_image_pane = read_image_panel(curr_image, palette=self.image_color_palette_select.value)
+#         self.image_pane = pn.Column(self.image_color_palette_select, new_image_pane,
+#                                     sizing_mode='stretch_both', height=100, width=100)
+#         new_hist_pane = image_histogram(curr_image,
+#                                         bins=self.image_hist_bin_number_widget.value)
+#         self.image_hist = pn.Column(self.image_hist_bin_number_widget, new_hist_pane,
+#                                     sizing_mode='stretch_both')
+#         self.bottom_row[0] = self.image_pane
+#         self.bottom_row[1] = self.image_hist
+#
+#
+#     def view(self):
+#
+#         # Button
+#         self.spatial_current_button.on_click(self.on_spatial_current_datetime_change)
+#
+#         # Plots
+#         self.met_plot = pn.bind(self.update_met_plot, self.met_variable_select,
+#                            self.date_slider.param.value, self.date_slider.param.value)
+#         self.temp_plot = pn.bind(self.temperature_plot, self.mat_palette_select,
+#                                      self.date_slider.param.value)
+#         self.flux_plot = pn.bind(self.flux_plot, self.mat_palette_select,
+#                                            self.date_slider.param.value)
+#
+#         # Widgets
+#         self.met_plot_widget = pn.Column(self.met_variable_select, self.met_plot,
+#                                     sizing_mode='stretch_both', width=500, height=400)
+#
+#         self.temp_plot_widget = pn.Column(self.mat_palette_select,
+#                                           self.temp_plot,
+#                                      sizing_mode='stretch_both',
+#                                      width=500,
+#                                      height=400)
+#
+#         self.flux_plot_widget = pn.Column(pn.Spacer(height=50), self.flux_plot,
+#                                      sizing_mode='stretch_both',
+#                                      width=500,
+#                                      height=400)
+#
+#         # Spatial VTK Plot
+#         self.mesh = read_2dm_pyvista("data/Scenario1_mats.2dm")
+#         self.plotter = plot_mesh(self.mesh)
+#         self.vtk_plot = pn.panel(self.plotter.ren_win,
+#                                  sizing_mode='stretch_both',
+#                                  enable_keybindings=True, orientation_widget=True,
+#                                  width=200, height=200)
+#         self.vtk_pane = pn.Column(self.vtk_cell_array_select,
+#                                     self.vtk_plot,
+#                                     sizing_mode='stretch_both',
+#                                     width=500, height=500)
+#
+#         # Image Plot
+#         curr_image = self.spatial_df.loc[self.current_datetime]['Imagery']
+#         self.image_pane = pn.Column(self.image_color_palette_select, read_image_panel(
+#             curr_image, palette=self.image_color_palette_select.value),
+#                                     sizing_mode='stretch_both', height=100, width=100)
+#         self.image_pane.sizing_mode = 'stretch_both'
+#         self.image_pane.width = 100
+#         self.image_pane.height = 100
+#
+#         # Image Histogram Plot
+#         self.image_hist = pn.Column(self.image_hist_bin_number_widget,
+#                                     image_histogram(curr_image, bins=5),
+#                                     sizing_mode='stretch_both')
+#         self.image_hist.sizing_mode = 'stretch_both'
+#         self.image_hist.width = 100
+#         self.image_hist.height = 100
+#
+#         self.bottom_row = pn.Row(self.image_pane, self.image_hist, self.vtk_pane,
+#                          sizing_mode='stretch_both')
+#         top_row = pn.Row(self.met_plot_widget, self.temp_plot_widget,
+#                          self.flux_plot_widget, sizing_mode='stretch_both')
+#
+#         self.template = MaterialTemplate(title="VESPA Simulation Analysis",
+#                                          theme=DarkTheme,
+#                                     main=[pn.Column(pn.pane.Markdown('## Plot Components'),
+#                                                     top_row,
+#                                                     pn.Spacer( background='#ffffff',
+#                                                                height=5),
+#                                         pn.pane.Markdown('## Spatial Components'),
+#                                                             self.bottom_row),
+#                                           ],
+#                                     sidebar=[pn.pane.Markdown('## Date Range'),
+#                                              pn.pane.Markdown('### Choose the date '
+#                                                               'range to graph the '
+#                                                               'data'),
+#                                              self.date_range_slider,
+#                                              pn.Spacer(height=35),
+#                                              pn.layout.Divider(),
+#                                              pn.pane.Markdown('## Date'),
+#                                              pn.pane.Markdown('### Choose the '
+#                                                               'particular date to '
+#                                                               'view'),
+#                                              self.date_slider,
+#                                              pn.Spacer(height=35),
+#                                              pn.layout.Divider(),
+#                                              pn.Spacer(height=15),
+#                                              self.current_datetime_text,
+#                                              pn.Spacer(height=15),
+#                                              self.spatial_current_button],
+#                                     )
+#         return self.template
 
 if __name__ == "__main__":
     met = read_met('data/Scenario1.met')
@@ -828,5 +1172,9 @@ if __name__ == "__main__":
 
     source = ColumnDataSource(dfs)
 
-    dashboard = Dashboard(source, spatial_df)
-    dashboard.view().show()
+    # dashboard = Dashboard(source, spatial_df)
+    # dashboard.view().show()
+    db_model = DashboardModel(source, spatial_df, 'data/Scenario1_mats.2dm')
+    db_view = DashboardView(db_model)
+    db_controller = DashboardController(db_model, db_view)
+    db_view.view().show()
