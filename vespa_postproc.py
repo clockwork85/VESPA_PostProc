@@ -704,10 +704,6 @@ class DashboardView(param.Parameterized):
         logo_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_ERDC_Gear-symbols.png')
         logo_uri = f"data:image/jpeg;base64,{logo_base64}"
         header_img = pn.pane.HTML(f'<img src="{logo_uri}" width="150" height="150" style="center-align: middle;">')
-        title_text = 'VESPA Analysis'
-        dashboard_title = pn.pane.HTML(
-            f'<h2 style="font-size: 30px; color: #ffffff; margin: 40px 0 0 20px; display: inline; white-space; nowrap">{title_text}</h2>'
-        )
         gsl_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_Full_ERDC_Graphic-White_Text.png')
         gsl_uri = f"data:image/jpeg;base64,{gsl_base64}"
         gsl_img = pn.pane.HTML(f'<img src="{gsl_uri}" width="200", height="100", style="vertical-align: middle;">')
@@ -862,9 +858,6 @@ class DashboardController(param.Parameterized):
         self.view.flux_plot_bind = pn.bind(self.view.flux_plot,
                                       self.view.mat_palette_select,
                                       self.view.date_slider.param.value)
-        # Checkbox
-        # self.view.match_color_palette = pn.bind(self.model.update_vtk_temp_palette,
-        #                                         self.view.image_color_palette_select)
 
     # Button callback
     def on_spatial_current_datetime_change(self, event):
