@@ -7,6 +7,7 @@ import logging
 import glob
 import io
 import re
+import threading
 from typing import List, Dict, Tuple, Union
 
 from bokeh.models import ColumnDataSource
@@ -219,11 +220,15 @@ def parallel_read_and_average_fsd(
         futures = {executor.submit(serial_read_and_average_fsd, mesh_file, fsd_file, is_nodal): fsd_file for fsd_file in data_files}
         results = []
 
+        processed_files = 0
+        total_files = len(data_files)
+
         for future in concurrent.futures.as_completed(futures):
             fsd_file = futures[future]
             try:
                 result = future.result()
-                print(f'File {fsd_file} processed by worker {future._worker_id}')
+                processed_files += 1
+                print(f'File {fsd_file} processed ({processed_files}/{total_files})')
                 results.append(result)
             except Exception as e:
                 print(f'File {fsd_file} encountered an error: {e}')
@@ -257,11 +262,19 @@ def compute_fsd_averages_by_material_id(
 
     return avg_df
 
-def build_image_dataframe(images: List[str], start_year: int, column_prefix: str =
-    "Imagery") -> pd.DataFrame:
+def build_image_dataframe(images: List[str], start_year: int, column_prefix: str = "Imagery", store_data: bool = False) \
+        -> pd.DataFrame:
 
-    datetime_file_dict = { image_filename_to_datetime(filename, start_year): filename
-                           for filename in images }
+    def image_data(filename: str) -> np.ndarray:
+        with open(filename, "rb") as f:
+            img = Image.open(f)
+            return np.array(img)
+
+    datetime_file_dict = {
+        image_filename_to_datetime(filename, start_year): (
+            image_data(filename) if store_data else filename
+        ) for filename in images
+    }
     image_series = pd.Series(datetime_file_dict)
     image_series.sort_index(inplace=True)
 
@@ -270,13 +283,14 @@ def build_image_dataframe(images: List[str], start_year: int, column_prefix: str
     return image_series.to_frame()
 
 def build_vtk_temperature_dataframe(surface_temp_files: List[str], start_year: int,
-                                    column_prefix: str = "Surface Temperature") -> \
+                                    column_prefix: str = "Surface Temperature", store_data: bool=False) -> \
         pd.DataFrame:
-    datetime_file_dict = { fsd_filename_to_datetime(filename, start_year): filename
-                             for filename in surface_temp_files }
+    datetime_file_dict = { fsd_filename_to_datetime(filename, start_year): (
+            read_fsd(filename) if store_data else filename
+        ) for filename in surface_temp_files
+    }
     temp_series = pd.Series(datetime_file_dict)
     temp_series.sort_index(inplace=True)
-
     temp_series.name = column_prefix
 
     return temp_series.to_frame()
@@ -342,9 +356,13 @@ def merge_dataframes_on_datetime(
 
 # Images
 
-def image_histogram(image_path: str, bins: int = 5):
+def image_histogram(image_path_or_data: Union[str, np.ndarray], bins: int = 5):
 
-    image = Image.open(image_path)
+    if isinstance(image_path_or_data, str):
+        image = Image.open(image_path_or_data)
+    else:
+        image = Image.fromarray(image_path_or_data)
+
     if image.mode != 'L':
         image = image.convert('L')
     image_data = np.array(image)
@@ -395,8 +413,7 @@ def numpy_datetime64_to_datetime(dt64: np.datetime64) -> datetime:
     return datetime.utcfromtimestamp(ts)
 
 def create_met_plot(source: ColumnDataSource, met_column: str,
-                    legend_label: str, y_axis_label: str, span_line: Span,
-                    width: int, height: int) -> figure:
+                    legend_label: str, y_axis_label: str, span_line: Span, width: int, height: int) -> figure:
     title_text = f"{met_column.capitalize()} vs. Date"
     met_plot = figure(x_axis_type='datetime',
                       x_axis_label='Date', y_axis_label=y_axis_label, plot_width=width,
@@ -404,15 +421,15 @@ def create_met_plot(source: ColumnDataSource, met_column: str,
                       )
     met_plot.line(x='index', y=met_column, source=source, legend_label=legend_label)
     met_plot.title = Title(text=title_text, align='center', text_font_size='18px')
-    met_plot.add_layout(span_line)
+    if span_line:
+        met_plot.add_layout(span_line)
     met_plot.legend.location = 'top_left'
     met_plot.legend.click_policy = 'hide'
 
     return met_plot
 
 def create_variable_plot(source: ColumnDataSource, columns: List[str], title: str,
-                         y_axis_label: str, span_line: Span, colors, width: int,
-                         height: int) -> figure:
+                         y_axis_label: str, span_line: Span, colors, width: int, height: int) -> figure:
     title_text = f"{title}"
     var_plot = figure(x_axis_type='datetime', x_axis_label='Date',
                       y_axis_label=y_axis_label, plot_width=width, plot_height=height)
@@ -423,7 +440,8 @@ def create_variable_plot(source: ColumnDataSource, columns: List[str], title: st
                       color=colors[matid-1], legend_label=legend_label)
 
     var_plot.title = Title(text=title_text, align='center', text_font_size='18px')
-    var_plot.add_layout(span_line)
+    if span_line:
+        var_plot.add_layout(span_line)
     var_plot.legend.location = 'top_left'
     var_plot.legend.click_policy = 'hide'
     return var_plot
@@ -478,8 +496,14 @@ class DashboardModel(param.Parameterized):
         return max([int(col.split('_')[-1]) for col in matid_cols])
 
 
-    def update_image_panel(self, image_path: str, palette='white hot') -> pn.pane.JPG:
-        image = Image.open(image_path)
+    def update_image_panel(self, image_data_or_path: Union[str, np.ndarray], palette='white hot') -> pn.pane.JPG:
+
+        if isinstance(image_data_or_path, str):
+            with open(image_data_or_path, 'rb') as f:
+                image = Image.open(f)
+        else:
+            image = Image.fromarray(image_data_or_path)
+
         img_array = np.array(image)
 
         if palette in self.custom_color_maps:
@@ -556,8 +580,13 @@ class DashboardModel(param.Parameterized):
 
     def update_temperatures(self):
         log.debug(f"Updating temperatures to date {self.current_datetime}")
-        temps = read_fsd(self.spatial_df.loc[self.current_datetime]['Surface '
-                                                                    'Temperature'])
+        temp_data_or_path = self.spatial_df.loc[self.current_datetime]['Surface Temperature']
+
+        if isinstance(temp_data_or_path, str):
+            temps = read_fsd(temp_data_or_path)
+        else:
+            temps = temp_data_or_path
+
         self.mesh.point_data['Temperature'] = np.array(temps, dtype=float)
 
 
@@ -617,38 +646,48 @@ class DashboardView(param.Parameterized):
 
     def create_vtk_pane(self):
         return pn.Column(pn.Row(self.vtk_array_select, pn.Column(self.match_color_palette, self.mesh_show_edges)), pn.panel(
-            self.plotter.ren_win, sizing_mode='stretch_both', enable_keybindings=True,
-                                                              orientation_widget=True),
-                         sizing_mode='stretch_both', height=200, width=200)
+            self.plotter.ren_win, sizing_mode='stretch_both', enable_keybindings=True, orientation_widget=True),
+                         sizing_mode='stretch_both', height=200, width=400)
 
-    @pn.depends("met_variable_select.param.value", "date_slider.param.value")
     def met_plot(self, met_variable: str, date: np.datetime64) -> pn.layout:
-        met_plot = create_met_plot(source=self.model.filtered_source, met_column=met_variable,
-                                   y_axis_label=self.model.met_unit_dict[met_variable], span_line=self.span_line,
-                                   legend_label=met_variable, width=550, height=400)
-        return met_plot
+        met_plot_future = concurrent.futures.Future()
+        def met_flux_thread():
+            met_plot = create_met_plot(source=self.model.filtered_source, met_column=met_variable,
+                                y_axis_label=self.model.met_unit_dict[met_variable], span_line=self.span_line,
+                                legend_label=met_variable, width=550, height=400)
+            met_plot_future.set_result(met_plot)
+        threading.Thread(target=met_flux_thread).start()
+        return met_plot_future.result()
 
-    @pn.depends("mat_palette_select.param.value", "date_slider.param.value")
     def temperature_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
-        title = 'Temperature vs. Date'
-        y_axis_label = 'Temperature (°C)'
-        temp_cols = [col for col in self.model.filtered_source.data.keys() if
-                        'Temperature_Ave_MatID_' in col]
-        return create_variable_plot(self.model.filtered_source, temp_cols, title,
-                                    y_axis_label, self.span_line,
-                                    self.model.mat_palette_colors, width=550,
-                                    height=400)
+        temp_plot_future = concurrent.futures.Future()
 
-    @pn.depends("mat_palette_select.param.value", "date_slider.param.value")
+        def temp_flux_thread():
+            title = 'Temperature vs. Date'
+            y_axis_label = 'Temperature (°C)'
+            temp_cols = [col for col in self.model.filtered_source.data.keys() if
+                                'Temperature_Ave_MatID_' in col]
+            temp_plot = create_variable_plot(self.model.filtered_source, temp_cols, title,
+                                    y_axis_label, self.span_line, self.model.mat_palette_colors, width=550, height=400)
+            temp_plot_future.set_result(temp_plot)
+        threading.Thread(target=temp_flux_thread).start()
+        return temp_plot_future.result()
+
     def flux_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
-        title = 'Flux vs. Date'
-        y_axis_label = 'Flux (W/m^2)'
-        flux_cols = [col for col in self.model.filtered_source.data.keys() if
-                        'Flux_Ave_MatID_' in col]
-        return create_variable_plot(self.model.filtered_source, flux_cols, title,
-                                    y_axis_label, self.span_line,
-                                    self.model.mat_palette_colors, width=550,
-                                    height=400)
+        flux_plot_future = concurrent.futures.Future()
+
+        def flux_plot_thread():
+            title = 'Flux vs. Date'
+            y_axis_label = 'Flux (W/m^2)'
+            flux_cols = [col for col in self.model.filtered_source.data.keys() if
+                            'Flux_Ave_MatID_' in col]
+            flux_plot = create_variable_plot(self.model.filtered_source, flux_cols, title,
+                                        y_axis_label, self.span_line,
+                                        self.model.mat_palette_colors, width=550,
+                                        height=400)
+            flux_plot_future.set_result(flux_plot)
+        threading.Thread(target=flux_plot_thread).start()
+        return flux_plot_future.result()
 
     def update_vtk_pane_with_new_mesh(self):
         vtk_array = self.vtk_array_select.value
@@ -675,23 +714,35 @@ class DashboardView(param.Parameterized):
                               show_scalar_bar=True, scalar_bar_args=dict(title=title),
                               name=vtk_array)
     def view(self):
+
         # Top Row Widgets
         self.met_plot_widget = pn.Column(self.met_variable_select, self.met_plot_bind,
                                             sizing_mode='fixed', width=550, height=465)
         self.temp_plot_widget = pn.Column(self.mat_palette_select, self.temp_plot_bind,
                                             sizing_mode='fixed', width=550, height=465)
-        self.flux_plot_widget = pn.Column(self.spacer, self.flux_plot_bind,
-                                            sizing_mode='fixed', width=550, height=465)
+        self.flux_plot_widget = pn.Column(self.spacer, self.flux_plot_bind, sizing_mode='fixed', width=550,
+                                          height=465)
+
         # Bottom row Widgets
         self.image_pane = self.create_image_pane()
         self.image_hist_pane = self.create_image_hist_pane()
         self.vtk_pane = self.create_vtk_pane()
 
         self.bottom_row = pn.Row(self.image_pane, self.image_hist_pane, self.vtk_pane,
-                                    sizing_mode='stretch_both')
+                                    sizing_mode='stretch_width')
         self.top_row = pn.Row(self.met_plot_widget, self.init_makeshift_width_spacer(10), self.temp_plot_widget,
                                 self.init_makeshift_width_spacer(10), self.flux_plot_widget,
                                 sizing_mode='stretch_both')
+
+        logo_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_ERDC_Gear-symbols.png')
+        logo_uri = f"data:image/jpeg;base64,{logo_base64}"
+        footer_img = pn.pane.HTML(f'<img src="{logo_uri}" width="150" height="150" style="center-align: middle;">')
+        header_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_Full_ERDC_Graphic-White_Text.png')
+        header_uri = f"data:image/jpeg;base64,{header_base64}"
+        header_img = pn.pane.HTML(f'<img src="{header_uri}" width="200", height="100", style="vertical-align: middle;">')
+
+        header_row = pn.Row(self.init_makeshift_width_spacer(650), header_img)
+
         sidebar_params = [
             pn.pane.Markdown('## Date Range'),
             pn.pane.Markdown('### Choose the date range to graph the data'),
@@ -700,33 +751,29 @@ class DashboardView(param.Parameterized):
             pn.pane.Markdown('### Choose the particular date to view'),
             self.date_slider, pn.Spacer(height=35), pn.layout.Divider(),
             pn.Spacer(height=15), self.current_datetime_text,
-            pn.Spacer(height=15), self.spatial_current_button ]
-        logo_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_ERDC_Gear-symbols.png')
-        logo_uri = f"data:image/jpeg;base64,{logo_base64}"
-        header_img = pn.pane.HTML(f'<img src="{logo_uri}" width="150" height="150" style="center-align: middle;">')
-        gsl_base64 = image_to_base64('./data/ERDC_Graphic_Breakdown_Full_ERDC_Graphic-White_Text.png')
-        gsl_uri = f"data:image/jpeg;base64,{gsl_base64}"
-        gsl_img = pn.pane.HTML(f'<img src="{gsl_uri}" width="200", height="100", style="vertical-align: middle;">')
-        header_row = pn.Row(self.init_makeshift_width_spacer(650), gsl_img)
-        sidebar_params.append(self.init_makeshift_spacer(500))
-        sidebar_params.append(header_img)
+            pn.Spacer(height=15), self.spatial_current_button,
+            pn.Spacer(height=500), footer_img
+        ]
+
         self.template = MaterialTemplate(title='VESPA Simulation Analysis',
                                          theme=DarkTheme,
-                                         header=[header_row],
-                                         main=[pn.Column(
-                                               pn.pane.Markdown('# Plot Components'),
-                                               self.top_row,
-                                               pn.Spacer(background='#ffffff',
-                                                         height=2),
-                                               pn.Row(pn.pane.Markdown('# Spatial Components'),
-                                                      self.init_makeshift_width_spacer(820),
-                                                      pn.pane.Markdown(f'## Mesh Nodes: {self.model.surface_mesh_nodes}'),
-                                                      self.init_makeshift_width_spacer(150),
-                                                      pn.pane.Markdown(f'## Mesh Facets: {self.model.surface_mesh_facets}')
-                                                      ),
-                                               self.bottom_row)],
-                                         sidebar=sidebar_params,
                                          )
+        self.template.header.append(header_row)
+
+        # Add components as separate roots to the main area
+        self.template.main.append(pn.pane.Markdown('# Plot Components'))
+        self.template.main.append(self.top_row)
+        self.template.main.append(pn.Spacer(background='#ffffff', height=2))
+        self.template.main.append(pn.Row(pn.pane.Markdown('# Spatial Components'),
+                                         self.init_makeshift_width_spacer(820),
+                                         pn.pane.Markdown(f'## Mesh Nodes: {self.model.surface_mesh_nodes}'),
+                                         self.init_makeshift_width_spacer(150),
+                                         pn.pane.Markdown(f'## Mesh Facets: {self.model.surface_mesh_facets}')))
+        self.template.main.append(self.bottom_row)
+
+        for component in sidebar_params:
+            self.template.sidebar.append(component)
+
         return self.template
 
     def init_date_range_slider(self) -> pn.widgets.DateRangeSlider:
@@ -853,11 +900,11 @@ class DashboardController(param.Parameterized):
                                           self.view.met_variable_select,
                                      self.view.date_slider.param.value)
         self.view.temp_plot_bind = pn.bind(self.view.temperature_plot,
-                                      self.view.mat_palette_select,
-                                      self.view.date_slider.param.value)
+                                     self.view.mat_palette_select,
+                                     self.view.date_slider.param.value)
         self.view.flux_plot_bind = pn.bind(self.view.flux_plot,
-                                      self.view.mat_palette_select,
-                                      self.view.date_slider.param.value)
+                                     self.view.mat_palette_select,
+                                     self.view.date_slider.param.value)
 
     # Button callback
     def on_spatial_current_datetime_change(self, event):
@@ -904,14 +951,12 @@ if __name__ == "__main__":
     data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/VizPlot'
     met_file = f'{data_dir}/VizPlot.met'
     surf_mesh_file = f'{data_dir}/VizPlot.2dm'
-    # veg_mesh_file = f'{data_dir}/Scenario1_veg.2dm'
     surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
     surf_flux_files = glob.glob(f'{data_dir}/file_sock200*.fsd')
-    # veg_temp_files = glob.glob(f'{data_dir}/file_sock600*.fsd')
-    # veg_flux_files = glob.glob(f'{data_dir}/file_sock500*.fsd')
     image_files = glob.glob(f'{data_dir}/VizPlot*.jpg')
 
-    first_run = False
+    first_run = True
+    store_data = True
     plot_comp_hdf = 'VizPlot_plot_comp.h5'
     spatial_comp_hdf = 'VizPlot_spatial_comp.h5'
 
@@ -927,46 +972,28 @@ if __name__ == "__main__":
             'Temperature',
             num_processors=6
         )
-        # print("Reading in veg temperatures")
-        # veg_temp_plot_df = compute_fsd_averages_by_material_id(
-        #     veg_mesh_file,
-        #     veg_temp_files,
-        #     2022,
-        #     'Temperature'
-        # )
-        # print("Done reading in veg temperatures")
-        #
 
-        # log.debug("Reading Fluxes")
         # surf_flux_plot_df = compute_fsd_averages_by_material_id(
         #     surf_mesh_file,
         #     surf_flux_files,
         #     2022,
         #     'Flux',
-        #     False,
-        #     num_processors=6
+        #     num_processors=6,
+        #     is_nodal=True
         # )
-
-        # print(f"Reading in veg fluxes")
-        # veg_flux_plot_df = compute_fsd_averages_by_material_id(
-        #     veg_mesh_file,
-        #     veg_flux_files,
-        #     2022,
-        #     'Flux',
-        #     False,
-        # )
-        # print(f"Done reading in veg fluxes")
 
         image_df = build_image_dataframe(
             image_files,
             2022,
-            'Imagery'
+            'Imagery',
+            store_data=store_data
         )
 
         surf_mesh_temp_df = build_vtk_temperature_dataframe(
             surf_temp_files,
             2022,
-            'Surface Temperature'
+            'Surface Temperature',
+            store_data=store_data
         )
 
         surf_mesh_flux_df = build_vtk_flux_dataframe(
@@ -975,23 +1002,13 @@ if __name__ == "__main__":
             'Surface Flux'
         )
 
-        # veg_mesh_temp_df = build_vtk_temperature_dataframe(
-        #     veg_temp_files,
-        #     2022,
-        #     'Vegetation Temperature'
-        # )
-        #
-        # veg_mesh_flux_df = build_vtk_flux_dataframe(
-        #     veg_flux_files,
-        #     2022,
-        #     'Vegetation Flux'
-        # )
-        #
-
-
         spatial_df = merge_dataframes_on_datetime(image_df, surf_mesh_temp_df, surf_mesh_flux_df)
 
         dfs = merge_dataframes_on_datetime(met_dt, surf_temp_plot_df) # , surf_flux_plot_df)
+        if plot_comp_hdf == 'VizPlot_plot_comp.h5':
+            dfs['Flux_Ave_MatID_1'] = dfs['Temperature_Ave_MatID_1'] * 35
+            dfs['Flux_Ave_MatID_2'] = dfs['Temperature_Ave_MatID_2'] * 35
+            dfs['Flux_Ave_MatID_3'] = dfs['Temperature_Ave_MatID_3'] * 35
 
         dfs.to_hdf(plot_comp_hdf, key='data')
         spatial_df.to_hdf(spatial_comp_hdf, key='data')
