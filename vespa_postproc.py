@@ -10,6 +10,7 @@ import re
 import threading
 from typing import List, Dict, Tuple, Union
 
+from bokeh.io import save
 from bokeh.models import ColumnDataSource
 from bokeh.models.annotations import Span, Title
 from bokeh.palettes import Category10, Category20, Set2_8, Set3_10, viridis
@@ -39,6 +40,42 @@ logging.basicConfig(
     handlers=[RichHandler(rich_tracebacks=True)],
 )
 log = logging.getLogger("rich")
+
+class FairyLayout:
+
+    sublabel_color = '#6F88FC' # royal blue
+    label_color =    '#45E3FF' # light blue
+    slider_color =   '#FF7582' # white
+    knob_color =     '#FF7582' # white
+    border_color =   '#A163F7' # white
+
+
+
+
+raw_css= '''
+    .custom-date-range-slider .bk .bk-slider-title {
+        font-size: 17px;
+        margin-bottom: 12px;
+        margin-left: 2px;
+    }
+    .custom-date-slider .bk .bk-slider-title {
+        font-size: 17px;
+        margin-bottom: 12px;
+        margin-left: 70px;
+    }
+    .custom-static-text .bk-clearfix {
+        font-size: 25px;
+        margin-left: 45px;
+    }
+    .custom-btn .bk-btn {
+        font-size: 15px;
+    }
+    '''
+
+pn.extension(raw_css=[raw_css])
+
+
+
 
 
 def image_to_base64(image_path: str) -> base64:
@@ -74,7 +111,7 @@ def read_met(metfile: str) -> pd.DataFrame:
     }
 
     col_conversion = {
-        'Temp': 'Temperature',
+        'Temp': 'Air Temperature',
         'Press': 'Pressure',
         'WndSpd': 'Wind Speed',
         'WndDir': 'Wind Direction',
@@ -370,7 +407,7 @@ def image_histogram(image_path_or_data: Union[str, np.ndarray], bins: int = 5):
         'Grayscale': image_data.flatten(),
     })
 
-    histogram = df.hvplot.hist(y='Grayscale', ylabel='Total Irradiance', yformatter='%.1e', bins=bins, color='gray',
+    histogram = df.hvplot.hist(y='Grayscale', ylabel='Total Irradiance (W/m^2)', yformatter='%.1e', bins=bins, color='gray',
                                width=500, height=500)
     return histogram
 
@@ -398,9 +435,9 @@ def read_2dm_pyvista(mesh_file: str) -> pv.PolyData:
 
     return mesh, len(mesh.points), mesh.n_cells
 
-def plot_mesh(mesh: pv.PolyData) -> pv.Plotter:
+def plot_mesh(mesh: pv.PolyData, cmap) -> pv.Plotter:
     plotter = pv.Plotter(window_size=(1000, 1000))
-    plotter.add_mesh(mesh, scalars='MatID', show_edges=False, show_scalar_bar=True)
+    plotter.add_mesh(mesh, scalars='MatID', cmap=cmap, show_edges=False, show_scalar_bar=True)
     plotter.view_xy()
     return plotter
 
@@ -436,7 +473,7 @@ def create_variable_plot(source: ColumnDataSource, columns: List[str], title: st
     for column in columns:
         matid = int(column.split('_')[-1])
         legend_label = f'Material ID {matid}'
-        var_plot.line(x='index', y=column, source=source, line_width=2,
+        var_plot.line(x='index', y=column, source=source, line_width=1,
                       color=colors[matid-1], legend_label=legend_label)
 
     var_plot.title = Title(text=title_text, align='center', text_font_size='18px')
@@ -458,8 +495,8 @@ class DashboardModel(param.Parameterized):
         self.filtered_source = ColumnDataSource(data=self.source.data)
         self.mesh, self.surface_mesh_nodes, self.surface_mesh_facets = read_2dm_pyvista(mesh_file)
         self.current_datetime = None
-        self.mat_palette_colors = viridis(self.highest_matid)
-        self.vtk_mat_palette_colors = ListedColormap(viridis(self.highest_matid))
+        self.mat_palette_colors = Set2_8
+        self.vtk_mat_palette_colors = ListedColormap(Set2_8[:self.highest_matid])
         self.vtk_vtk_palette_colors = ListedColormap('plasma')
         self.custom_color_maps = {
             'flir': flir_cmap,
@@ -474,7 +511,7 @@ class DashboardModel(param.Parameterized):
             'plasma': cm.plasma,
         }
         self.met_unit_dict = {
-            'Temperature': 'Temperature (°C)',
+            'Air Temperature': 'Temperature (°C)',
             'Pressure': 'Millibar (mbar)',
             'Global Radiation': 'Flux (W/m^2)',
             'Direct Radiation': 'Flux (W/m^2)',
@@ -609,7 +646,7 @@ class DashboardView(param.Parameterized):
         self.span_line = Span(location=self.date_slider.value, dimension='height',
                               line_color='red', line_dash='dashed', line_width=1)
         self.mat_palette_colors = viridis(self.model.highest_matid)
-        self.plotter = plot_mesh(self.model.mesh)
+        self.plotter = plot_mesh(self.model.mesh, self.model.vtk_mat_palette_colors)
         self.spacer = self.init_makeshift_spacer(50)
         self.match_color_palette = self.init_checkbox_match_color_palette()
         self.mesh_show_edges = self.init_checkbox_mesh_show_edges()
@@ -651,18 +688,18 @@ class DashboardView(param.Parameterized):
 
     def met_plot(self, met_variable: str, date: np.datetime64) -> pn.layout:
         met_plot_future = concurrent.futures.Future()
-        def met_flux_thread():
+        def met_thread():
             met_plot = create_met_plot(source=self.model.filtered_source, met_column=met_variable,
                                 y_axis_label=self.model.met_unit_dict[met_variable], span_line=self.span_line,
                                 legend_label=met_variable, width=550, height=400)
             met_plot_future.set_result(met_plot)
-        threading.Thread(target=met_flux_thread).start()
+        threading.Thread(target=met_thread).start()
         return met_plot_future.result()
 
     def temperature_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
         temp_plot_future = concurrent.futures.Future()
 
-        def temp_flux_thread():
+        def temp_thread():
             title = 'Temperature vs. Date'
             y_axis_label = 'Temperature (°C)'
             temp_cols = [col for col in self.model.filtered_source.data.keys() if
@@ -670,13 +707,13 @@ class DashboardView(param.Parameterized):
             temp_plot = create_variable_plot(self.model.filtered_source, temp_cols, title,
                                     y_axis_label, self.span_line, self.model.mat_palette_colors, width=550, height=400)
             temp_plot_future.set_result(temp_plot)
-        threading.Thread(target=temp_flux_thread).start()
+        threading.Thread(target=temp_thread).start()
         return temp_plot_future.result()
 
     def flux_plot(self, mat_palette_select, date: np.datetime64) -> pn.layout:
         flux_plot_future = concurrent.futures.Future()
 
-        def flux_plot_thread():
+        def flux_thread():
             title = 'Flux vs. Date'
             y_axis_label = 'Flux (W/m^2)'
             flux_cols = [col for col in self.model.filtered_source.data.keys() if
@@ -686,7 +723,7 @@ class DashboardView(param.Parameterized):
                                         self.model.mat_palette_colors, width=550,
                                         height=400)
             flux_plot_future.set_result(flux_plot)
-        threading.Thread(target=flux_plot_thread).start()
+        threading.Thread(target=flux_thread).start()
         return flux_plot_future.result()
 
     def update_vtk_pane_with_new_mesh(self):
@@ -744,15 +781,17 @@ class DashboardView(param.Parameterized):
         header_row = pn.Row(self.init_makeshift_width_spacer(650), header_img)
 
         sidebar_params = [
-            pn.pane.Markdown('## Date Range'),
-            pn.pane.Markdown('### Choose the date range to graph the data'),
+            pn.pane.Markdown('# Date Range', style={'color': FairyLayout.label_color}),
+            pn.pane.Markdown('### Choose the date range to graph the data', style={'color': FairyLayout.sublabel_color}),
             self.date_range_slider, pn.Spacer(height=35), pn.layout.Divider(),
-            pn.pane.Markdown('## Date'),
-            pn.pane.Markdown('### Choose the particular date to view'),
+            pn.pane.Markdown('# Date', style={'color': FairyLayout.label_color}),
+            pn.pane.Markdown('### Choose the particular date to view', style={'color': FairyLayout.sublabel_color}),
             self.date_slider, pn.Spacer(height=35), pn.layout.Divider(),
-            pn.Spacer(height=15), self.current_datetime_text,
+            pn.Spacer(height=90),
+            pn.pane.Markdown('# Current Spatial Data Date', style={'color': FairyLayout.label_color}),
+            self.current_datetime_text,
             pn.Spacer(height=15), self.spatial_current_button,
-            pn.Spacer(height=500), footer_img
+            pn.Spacer(height=340), footer_img
         ]
 
         self.template = MaterialTemplate(title='VESPA Simulation Analysis',
@@ -761,14 +800,14 @@ class DashboardView(param.Parameterized):
         self.template.header.append(header_row)
 
         # Add components as separate roots to the main area
-        self.template.main.append(pn.pane.Markdown('# Plot Components'))
+        self.template.main.append(pn.pane.Markdown('# Plot Components', style={'color': FairyLayout.label_color}))
         self.template.main.append(self.top_row)
         self.template.main.append(pn.Spacer(background='#ffffff', height=2))
-        self.template.main.append(pn.Row(pn.pane.Markdown('# Spatial Components'),
-                                         self.init_makeshift_width_spacer(820),
-                                         pn.pane.Markdown(f'## Mesh Nodes: {self.model.surface_mesh_nodes}'),
+        self.template.main.append(pn.Row(pn.pane.Markdown('# Spatial Components', style={'color': FairyLayout.label_color}),
+                                         self.init_makeshift_width_spacer(900),
+                                         pn.pane.Markdown(f'## Mesh Nodes: {self.model.surface_mesh_nodes}', style={'color': FairyLayout.label_color}),
                                          self.init_makeshift_width_spacer(150),
-                                         pn.pane.Markdown(f'## Mesh Facets: {self.model.surface_mesh_facets}')))
+                                         pn.pane.Markdown(f'## Mesh Facets: {self.model.surface_mesh_facets}', style={'color': FairyLayout.label_color})))
         self.template.main.append(self.bottom_row)
 
         for component in sidebar_params:
@@ -777,34 +816,38 @@ class DashboardView(param.Parameterized):
         return self.template
 
     def init_date_range_slider(self) -> pn.widgets.DateRangeSlider:
-        return pn.widgets.DateRangeSlider(name='Date Range',
+        return pn.widgets.DateRangeSlider(name='',
                                           start=self.model.source.data['index'][0],
                                           end=self.model.source.data['index'][-1],
                                           value=(self.model.source.data['index'][0],
                                                  self.model.source.data['index'][-1]),
                                           step=60 * 60 * 1000,
                                           tooltips=True,
-                                          format='%Y-%m-%d %H:%M')
+                                          format='%Y-%m-%d %H:%M',
+                                          css_classes=['custom-date-range-slider']
+                                          )
 
     def init_date_slider(self) -> pn.widgets.DateSlider:
-        return pn.widgets.DateSlider(name='Date',
+        return pn.widgets.DateSlider(name='',
                                      as_datetime=True,
                                      start=self.model.source.data['index'][0],
                                      end=self.model.source.data['index'][-1],
                                      value=self.model.source.data['index'][0],
                                      step=60 * 60 * 1000,
                                      tooltips=True,
-                                     format='%Y-%m-%d %H:%M')
+                                     format='%Y-%m-%d %H:%M',
+                                     css_classes=['custom-date-slider']
+                                     )
 
     def init_met_variable_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='Met Variable',
-                                 options=['Temperature', 'Relative Humidity', 'Global Radiation', 'Wind Direction',
+                                 options=['Air Temperature', 'Relative Humidity', 'Global Radiation', 'Wind Direction',
                                           'Wind Speed', 'Direct Radiation', 'Diffuse Radiation', 'Longwave Downwelling',
                                           'Zenith', 'Azimuth', 'Precipitation', 'Pressure'],
-                                 value='Temperature', sizing_mode='fixed')
+                                 value='Air Temperature', sizing_mode='fixed')
 
     def init_mat_palette_select(self) -> pn.widgets.Select:
-        options = ['Viridis', 'Set2_8', 'Set3_10', 'Category10', 'Category20']
+        options = ['Set2_8', 'Viridis', 'Set3_10', 'Category10', 'Category20']
         disabled_options=[]
 
         if self.model.highest_matid < 3:
@@ -813,7 +856,7 @@ class DashboardView(param.Parameterized):
         return pn.widgets.Select(name='Material Palette',
                                  options=options,
                                  disabled_options=disabled_options,
-                                 value=options[0], sizing_mode='fixed')
+                                 value='Set2_8', sizing_mode='fixed')
 
     def init_image_color_palette_select(self) -> pn.widgets.Select:
         return pn.widgets.Select(name='Image Color Palette',
@@ -841,12 +884,14 @@ class DashboardView(param.Parameterized):
                                  sizing_mode='fixed')
 
     def init_current_datetime_text(self) -> pn.widgets.StaticText:
-        return pn.widgets.StaticText(name='Displaying Spatial for Date ',
-                                     value=self.current_datetime_string)
+        return pn.widgets.StaticText(name='',
+                                     value=self.current_datetime_string,
+                                     css_classes=['custom-static-text'])
 
     def init_spatial_current_button(self) -> pn.widgets.Button:
         return pn.widgets.Button(name='Render Current Date Spatial Components',
-                                 button_type='primary')
+                                 button_type='primary',
+                                 css_classes=['custom-btn'])
 
     def init_makeshift_spacer(self, pixels: int) -> pn.pane.HTML:
         return pn.pane.HTML(f'<div style="height: {pixels}px;"></div>')
@@ -948,17 +993,29 @@ class DashboardController(param.Parameterized):
 
 if __name__ == "__main__":
 
-    data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/VizPlot'
-    met_file = f'{data_dir}/VizPlot.met'
-    surf_mesh_file = f'{data_dir}/VizPlot.2dm'
-    surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
-    surf_flux_files = glob.glob(f'{data_dir}/file_sock200*.fsd')
-    image_files = glob.glob(f'{data_dir}/VizPlot*.jpg')
+    scenario = 'VizPlot'
 
-    first_run = True
+    if scenario == 'VizPlot':
+        data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/VizPlot'
+        met_file = f'{data_dir}/VizPlot.met'
+        surf_mesh_file = f'{data_dir}/VizPlot.2dm'
+        surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
+        surf_flux_files = glob.glob(f'{data_dir}/file_sock200*.fsd')
+        image_files = glob.glob(f'{data_dir}/VizPlot*.jpg')
+        plot_comp_hdf = 'VizPlot_plot_comp.h5'
+        spatial_comp_hdf = 'VizPlot_spatial_comp.h5'
+    elif scenario == 'Scenario1':
+        data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/Scenario1/new'
+        met_file = f'{data_dir}/Scenario1.met'
+        surf_mesh_file = f'{data_dir}/Scenario1_mats.2dm'
+        surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
+        surf_flux_files = glob.glob(f'{data_dir}/file_sock200*.fsd')
+        image_files = glob.glob(f'{data_dir}/Scenario1*.jpg')
+        plot_comp_hdf = 'Scenario1_plot_comp.h5'
+        spatial_comp_hdf = 'Scenario1_spatial_comp.h5'
+
+    first_run = False
     store_data = True
-    plot_comp_hdf = 'VizPlot_plot_comp.h5'
-    spatial_comp_hdf = 'VizPlot_spatial_comp.h5'
 
     if first_run:
         met = read_met(met_file)
@@ -973,14 +1030,15 @@ if __name__ == "__main__":
             num_processors=6
         )
 
-        # surf_flux_plot_df = compute_fsd_averages_by_material_id(
-        #     surf_mesh_file,
-        #     surf_flux_files,
-        #     2022,
-        #     'Flux',
-        #     num_processors=6,
-        #     is_nodal=True
-        # )
+        if scenario == 'Scenario1':
+            surf_flux_plot_df = compute_fsd_averages_by_material_id(
+                surf_mesh_file,
+                surf_flux_files,
+                2022,
+                'Flux',
+                num_processors=6,
+                is_nodal=True
+            )
 
         image_df = build_image_dataframe(
             image_files,
@@ -1004,11 +1062,13 @@ if __name__ == "__main__":
 
         spatial_df = merge_dataframes_on_datetime(image_df, surf_mesh_temp_df, surf_mesh_flux_df)
 
-        dfs = merge_dataframes_on_datetime(met_dt, surf_temp_plot_df) # , surf_flux_plot_df)
-        if plot_comp_hdf == 'VizPlot_plot_comp.h5':
+        if scenario == 'VizPlot':
+            dfs = merge_dataframes_on_datetime(met_dt, surf_temp_plot_df)  # , surf_flux_plot_df)
             dfs['Flux_Ave_MatID_1'] = dfs['Temperature_Ave_MatID_1'] * 35
             dfs['Flux_Ave_MatID_2'] = dfs['Temperature_Ave_MatID_2'] * 35
             dfs['Flux_Ave_MatID_3'] = dfs['Temperature_Ave_MatID_3'] * 35
+        elif scenario == 'Scenario1':
+            dfs = merge_dataframes_on_datetime(met_dt, surf_temp_plot_df, surf_flux_plot_df)
 
         dfs.to_hdf(plot_comp_hdf, key='data')
         spatial_df.to_hdf(spatial_comp_hdf, key='data')
