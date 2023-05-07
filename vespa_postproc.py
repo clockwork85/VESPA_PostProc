@@ -993,7 +993,7 @@ class DashboardController(param.Parameterized):
 
 if __name__ == "__main__":
 
-    scenario = 'VizPlot'
+    scenario = 'Scenario1'
 
     if scenario == 'VizPlot':
         data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/VizPlot'
@@ -1005,7 +1005,8 @@ if __name__ == "__main__":
         plot_comp_hdf = 'VizPlot_plot_comp.h5'
         spatial_comp_hdf = 'VizPlot_spatial_comp.h5'
     elif scenario == 'Scenario1':
-        data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/Scenario1/new'
+        # data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/Scenario1/new'
+        data_dir = './data/'
         met_file = f'{data_dir}/Scenario1.met'
         surf_mesh_file = f'{data_dir}/Scenario1_mats.2dm'
         surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
@@ -1014,7 +1015,7 @@ if __name__ == "__main__":
         plot_comp_hdf = 'Scenario1_plot_comp.h5'
         spatial_comp_hdf = 'Scenario1_spatial_comp.h5'
 
-    first_run = False
+    first_run = True
     store_data = True
 
     if first_run:
