@@ -14,7 +14,7 @@ from bokeh.io import save
 from bokeh.models import ColumnDataSource
 from bokeh.models.annotations import Span, Title
 from bokeh.palettes import Category10, Category20, Set2_8, Set3_10, viridis
-from bokeh.plotting import figure, Figure
+from bokeh.plotting import figure
 import hvplot.pandas
 import matplotlib.cm as cm
 from matplotlib.colors import ListedColormap, to_rgba
@@ -1005,8 +1005,8 @@ if __name__ == "__main__":
         plot_comp_hdf = 'VizPlot_plot_comp.h5'
         spatial_comp_hdf = 'VizPlot_spatial_comp.h5'
     elif scenario == 'Scenario1':
-        # data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/Scenario1/new'
-        data_dir = './data/'
+        data_dir = '/Users/rdgslmdb/data_repo/VizTestPlot/Scenario1/new'
+        # data_dir = './data/'
         met_file = f'{data_dir}/Scenario1.met'
         surf_mesh_file = f'{data_dir}/Scenario1_mats.2dm'
         surf_temp_files = glob.glob(f'{data_dir}/file_sock300*.fsd')
@@ -1015,7 +1015,7 @@ if __name__ == "__main__":
         plot_comp_hdf = 'Scenario1_plot_comp.h5'
         spatial_comp_hdf = 'Scenario1_spatial_comp.h5'
 
-    first_run = True
+    first_run = False
     store_data = True
 
     if first_run:
