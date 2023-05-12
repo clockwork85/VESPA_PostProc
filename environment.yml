@@ -1,0 +1,4 @@
+name: VESPA_PostProc
+channels:
+  - defaults
+prefix: /Users/rdgslmdb/anaconda3/envs/VESPA_PostProc
